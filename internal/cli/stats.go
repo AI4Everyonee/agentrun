@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runStats prints per-agent and per-repo usage rollups.

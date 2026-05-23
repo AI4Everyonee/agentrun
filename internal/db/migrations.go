@@ -58,6 +58,13 @@ var migrations = []migration{
 		         VALUES (new.rowid, new.id, new.session_id, new.type, new.payload_json);
 		      END;`,
 	},
+	{
+		Version: 5,
+		Name:    "add_summary_to_sessions",
+		SQL: `ALTER TABLE sessions ADD COLUMN summary TEXT;
+		      ALTER TABLE sessions ADD COLUMN summary_model TEXT;
+		      ALTER TABLE sessions ADD COLUMN summary_tokens INTEGER;`,
+	},
 }
 
 // ensureVersionTable creates schema_versions if it does not already exist.

@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runWatch implements `agentrun watch [--filter <type>] [--since <duration>]`.

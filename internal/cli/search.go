@@ -26,7 +26,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 func runSearch(args []string) error {

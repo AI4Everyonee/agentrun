@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // setupSearchDB creates a temp DB with one session and session_summary row.

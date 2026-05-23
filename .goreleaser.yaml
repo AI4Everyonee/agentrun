@@ -1,0 +1,70 @@
+# goreleaser config — builds + packages agentrun binaries for every release tag.
+#
+# Run locally with:    goreleaser release --snapshot --clean
+# In CI (on tag push): .github/workflows/release.yml invokes goreleaser.
+#
+# We keep this deliberately minimal: pure-Go, CGO disabled, one binary per
+# (os, arch) tuple. No Docker, no Snap, no winget — those can come later.
+version: 2
+
+project_name: agentrun
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agentrun
+    main: ./cmd/agentrun
+    binary: agentrun
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE*
+      - README*
+      - examples/**/*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^docs?:"
+      - "^test:"
+
+release:
+  github:
+    owner: AI4Everyonee
+    name: agentrun
+  draft: false
+  prerelease: auto
+  name_template: "agentrun {{.Version}}"
+  header: |
+    Pre-built binaries for macOS and Linux (amd64 + arm64).
+    Install: `curl -fsSL https://raw.githubusercontent.com/AI4Everyonee/agentrun/main/install.sh | bash`

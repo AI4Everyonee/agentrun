@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/agent"
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/install"
+	"github.com/AI4Everyonee/agentrun/internal/agent"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/install"
 )
 
 // checkStatus summarises the result of one doctor check.

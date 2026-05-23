@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // doctorTestHome sets up a fake home directory with both Claude and Codex hook

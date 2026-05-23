@@ -23,11 +23,12 @@ func Resolve(agentName string) (string, error) {
 	return path, nil
 }
 
-// Version invokes "<binaryPath> --version" with a 2-second context timeout and
+// Version invokes "<binaryPath> --version" with a 5-second context timeout and
 // returns the trimmed stdout. Returns "" on any failure; never an error.
-// Version is best-effort metadata only.
+// Version is best-effort metadata only. 5s gives enough slack for slow disks
+// and parallel -race overhead while still being well under any session deadline.
 func Version(binaryPath string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binaryPath, "--version")

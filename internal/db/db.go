@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jeevan/agentrun/internal/schema"
+	"github.com/AI4Everyonee/agentrun/internal/schema"
 	_ "modernc.org/sqlite"
 )
 

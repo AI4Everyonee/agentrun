@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/ids"
+	"github.com/AI4Everyonee/agentrun/internal/ids"
 )
 
 // SessionRow maps to the sessions table.
@@ -48,12 +48,16 @@ type SessionRow struct {
 	MetadataJSON   string
 
 	// Added by migrations (see internal/db/migrations.go):
-	//   v1: user_name      — capture identity for multi-user cloud syncs
-	//   v2: tokens_used,   — token + cost rollup (parsed from PTY where possible)
+	//   v1: user_name           — capture identity for multi-user cloud syncs
+	//   v2: tokens_used,        — token + cost rollup (parsed from PTY where possible)
 	//       cost_usd_cents
-	UserName     sql.NullString
-	TokensUsed   sql.NullInt64
-	CostUSDCents sql.NullInt64
+	//   v5: summary, summary_model, summary_tokens — OpenAI session summary
+	UserName      sql.NullString
+	TokensUsed    sql.NullInt64
+	CostUSDCents  sql.NullInt64
+	Summary       sql.NullString
+	SummaryModel  sql.NullString
+	SummaryTokens sql.NullInt64
 }
 
 // EventRow maps to the events table.
@@ -133,8 +137,9 @@ func InsertSession(db *sql.DB, s SessionRow) error {
 		id, agent, agent_version, model, permission_mode,
 		cwd, repo_root, branch, start_commit_sha, end_commit_sha,
 		started_at, ended_at, exit_code, transcript_path, pid, metadata_json,
-		user_name, tokens_used, cost_usd_cents
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		user_name, tokens_used, cost_usd_cents,
+		summary, summary_model, summary_tokens
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	var endedAt interface{}
 	if s.EndedAt.Valid {
@@ -147,11 +152,26 @@ func InsertSession(db *sql.DB, s SessionRow) error {
 		fmtTime(s.StartedAt), endedAt, s.ExitCode, s.TranscriptPath, s.PID,
 		s.MetadataJSON,
 		s.UserName, s.TokensUsed, s.CostUSDCents,
+		s.Summary, s.SummaryModel, s.SummaryTokens,
 	)
 	if err != nil {
 		return fmt.Errorf("InsertSession: %w", err)
 	}
 	return nil
+}
+
+// UpdateSessionSummary writes the OpenAI-generated summary + metadata. Empty
+// summary skips. Same retry envelope as other Update helpers.
+func UpdateSessionSummary(d *sql.DB, sessionID, summary, model string, tokens int64) error {
+	if summary == "" {
+		return nil
+	}
+	return execWithRetry(d,
+		`UPDATE sessions
+		    SET summary = ?, summary_model = ?, summary_tokens = ?
+		  WHERE id = ?`,
+		summary, model, tokens, sessionID,
+	)
 }
 
 // UpdateSessionUserName sets sessions.user_name. Idempotent (overwrites).
@@ -275,7 +295,8 @@ func GetSession(db *sql.DB, sessionID string) (SessionRow, error) {
 		id, agent, agent_version, model, permission_mode,
 		cwd, repo_root, branch, start_commit_sha, end_commit_sha,
 		started_at, ended_at, exit_code, transcript_path, pid, metadata_json,
-		user_name, tokens_used, cost_usd_cents
+		user_name, tokens_used, cost_usd_cents,
+		summary, summary_model, summary_tokens
 	FROM sessions WHERE id=?`
 
 	row := db.QueryRow(q, sessionID)
@@ -290,6 +311,7 @@ func GetSession(db *sql.DB, sessionID string) (SessionRow, error) {
 		&startedAt, &endedAt, &s.ExitCode, &s.TranscriptPath, &s.PID,
 		&s.MetadataJSON,
 		&s.UserName, &s.TokensUsed, &s.CostUSDCents,
+		&s.Summary, &s.SummaryModel, &s.SummaryTokens,
 	)
 	if err != nil {
 		// Return sql.ErrNoRows directly so callers can distinguish not-found.
@@ -772,22 +794,58 @@ WHERE events_fts MATCH ?`
 }
 
 // FinalizeIdleSessions marks running sessions as completed if their last event
-// is older than olderThan ago. Returns the number of session rows finalized.
-// Both UPDATEs happen in one transaction.
-func FinalizeIdleSessions(d *sql.DB, olderThan time.Duration) (int, error) {
+// is older than olderThan ago. Returns the IDs of finalized sessions so
+// callers (e.g. `agentrun finalize-idle`) can schedule downstream work like
+// summarization. Both UPDATEs happen in one transaction.
+func FinalizeIdleSessions(d *sql.DB, olderThan time.Duration) ([]string, error) {
 	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339Nano)
+
+	// Collect the IDs that qualify BEFORE running the UPDATEs so we can
+	// return them. The same predicate is then reused in the UPDATE statements.
+	const selectIDs = `
+WITH last_event AS (
+    SELECT session_id, MAX(ts) AS last_ts
+      FROM events
+     GROUP BY session_id
+)
+SELECT s.id FROM sessions s
+  JOIN session_summary ss ON ss.session_id = s.id
+  LEFT JOIN last_event le ON le.session_id = s.id
+ WHERE ss.status = 'running'
+   AND (le.last_ts IS NULL OR le.last_ts < ?)`
+
+	rows, err := d.Query(selectIDs, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("FinalizeIdleSessions: select ids: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("FinalizeIdleSessions: scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("FinalizeIdleSessions: rows: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
 
 	tx, err := d.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("FinalizeIdleSessions: begin tx: %w", err)
+		return nil, fmt.Errorf("FinalizeIdleSessions: begin tx: %w", err)
 	}
+	committed := false
 	defer func() {
-		if err != nil {
+		if !committed {
 			_ = tx.Rollback()
 		}
 	}()
 
-	// Update sessions.ended_at to the last event's ts for sessions that qualify.
 	const updateSessions = `
 WITH last_event AS (
     SELECT session_id, MAX(ts) AS last_ts
@@ -803,13 +861,10 @@ UPDATE sessions
       WHERE ss.status = 'running'
         AND (le.last_ts IS NULL OR le.last_ts < ?)
  )`
-
-	_, err = tx.Exec(updateSessions, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("FinalizeIdleSessions: update sessions: %w", err)
+	if _, err = tx.Exec(updateSessions, cutoff); err != nil {
+		return nil, fmt.Errorf("FinalizeIdleSessions: update sessions: %w", err)
 	}
 
-	// Update session_summary.status = 'completed' for the same qualifying sessions.
 	const updateSummary = `
 WITH last_event AS (
     SELECT session_id, MAX(ts) AS last_ts
@@ -824,21 +879,15 @@ UPDATE session_summary SET status = 'completed'
       WHERE ss.status = 'running'
         AND (le.last_ts IS NULL OR le.last_ts < ?)
  )`
-
-	res, err := tx.Exec(updateSummary, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("FinalizeIdleSessions: update session_summary: %w", err)
-	}
-
-	count64, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("FinalizeIdleSessions: rows affected: %w", err)
+	if _, err = tx.Exec(updateSummary, cutoff); err != nil {
+		return nil, fmt.Errorf("FinalizeIdleSessions: update session_summary: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
-		return 0, fmt.Errorf("FinalizeIdleSessions: commit: %w", err)
+		return nil, fmt.Errorf("FinalizeIdleSessions: commit: %w", err)
 	}
-	return int(count64), nil
+	committed = true
+	return ids, nil
 }
 
 // ─── stats helpers ────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // TestRunFinalizeIdle_StaleSessionFlippedToCompleted verifies that running

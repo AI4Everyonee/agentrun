@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/collector"
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/collector"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // tempDB creates a fresh SQLite database in a temp dir and returns its path.

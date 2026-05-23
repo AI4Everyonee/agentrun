@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runDiff pipes the captured git_diff artifact through $PAGER (default less -R).

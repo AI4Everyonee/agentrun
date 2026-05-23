@@ -54,6 +54,8 @@ func Run(args []string) error {
 		return runTag(args[1:])
 	case "collector":
 		return runCollector(args[1:])
+	case "summarize":
+		return runSummarize(args[1:])
 	case "help", "-h", "--help":
 		return usage()
 	default:
@@ -83,6 +85,7 @@ Usage:
   agentrun gc [--older-than 30d]  Delete old sessions + artifacts
   agentrun doctor                 Verify installation health
   agentrun collector [start|stop] Long-lived hook receiver via Unix socket
+  agentrun summarize <session_id> Generate an OpenAI summary of a session
   agentrun hook <agent> <event>   Internal: invoked by claude/codex hooks (do not call directly)
   agentrun help                   Show this help`)
 	return ErrUsage

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/ids"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/ids"
 )
 
 // seedStatsDB creates 4 sessions (2 claude in /a and /b, 2 codex in /a),

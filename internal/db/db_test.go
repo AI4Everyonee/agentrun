@@ -963,13 +963,13 @@ func TestFinalizeIdleSessions_OnlyAffectsOldSessions(t *testing.T) {
 		t.Fatalf("InsertEventOne old: %v", err)
 	}
 
-	count, err := FinalizeIdleSessions(d, 10*time.Minute)
+	ids, err := FinalizeIdleSessions(d, 10*time.Minute)
 	if err != nil {
 		t.Fatalf("FinalizeIdleSessions: %v", err)
 	}
 
-	if count != 1 {
-		t.Errorf("FinalizeIdleSessions: got count=%d, want 1", count)
+	if len(ids) != 1 {
+		t.Errorf("FinalizeIdleSessions: got count=%d, want 1", len(ids))
 	}
 
 	// s_recent must still be running.
@@ -1021,13 +1021,13 @@ func TestFinalizeIdleSessions_NoChangeWhenAllRecent(t *testing.T) {
 		t.Fatalf("InsertEventOne fresh: %v", err)
 	}
 
-	count, err := FinalizeIdleSessions(d, 30*time.Minute)
+	ids, err := FinalizeIdleSessions(d, 30*time.Minute)
 	if err != nil {
 		t.Fatalf("FinalizeIdleSessions: %v", err)
 	}
 
-	if count != 0 {
-		t.Errorf("FinalizeIdleSessions: got count=%d, want 0", count)
+	if len(ids) != 0 {
+		t.Errorf("FinalizeIdleSessions: got count=%d, want 0", len(ids))
 	}
 
 	var status string

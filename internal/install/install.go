@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/hooks"
+	"github.com/AI4Everyonee/agentrun/internal/hooks"
 )
 
 // Targets describes the install/uninstall outcome for one config file.

@@ -10,15 +10,15 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/jeevan/agentrun/internal/agent"
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/fswatcher"
-	"github.com/jeevan/agentrun/internal/gitmeta"
-	"github.com/jeevan/agentrun/internal/pty"
-	"github.com/jeevan/agentrun/internal/recorder"
-	"github.com/jeevan/agentrun/internal/redact"
-	"github.com/jeevan/agentrun/internal/userident"
+	"github.com/AI4Everyonee/agentrun/internal/agent"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/fswatcher"
+	"github.com/AI4Everyonee/agentrun/internal/gitmeta"
+	"github.com/AI4Everyonee/agentrun/internal/pty"
+	"github.com/AI4Everyonee/agentrun/internal/recorder"
+	"github.com/AI4Everyonee/agentrun/internal/redact"
+	"github.com/AI4Everyonee/agentrun/internal/userident"
 )
 
 // runAgent is the shared wrapper logic for all agent subcommands.
@@ -192,6 +192,11 @@ func runAgent(agentName string, args []string) error {
 
 	// 17. Restore terminal before exiting so the user's shell is not left broken.
 	handle.Close()
+
+	// 17b. Fire `agentrun summarize <sid>` detached. The child survives our
+	//      exit (Setsid) and writes the OpenAI summary asynchronously. No
+	//      key set → scheduleSummary is a no-op.
+	scheduleSummary(rec.SessionID())
 
 	// 18. Exit with the child's code so the wrapper is transparent.
 	os.Exit(exitCode)

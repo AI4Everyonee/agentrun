@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runTag annotates a session by inserting a synthetic event of type user.tag.

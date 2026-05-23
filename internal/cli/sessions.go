@@ -5,8 +5,8 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runSessions lists the 50 most-recent sessions from the DB.

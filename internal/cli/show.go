@@ -12,8 +12,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runShow prints a detailed summary for a single session.
@@ -94,6 +94,18 @@ func runShow(args []string) error {
 	}
 	if s.ExitCode.Valid {
 		fmt.Printf("Exit code: %d\n", s.ExitCode.Int64)
+	}
+	if s.Summary.Valid && s.Summary.String != "" {
+		fmt.Println()
+		fmt.Println("Summary:")
+		fmt.Printf("  %s\n", s.Summary.String)
+		if s.SummaryModel.Valid {
+			fmt.Printf("  (model: %s", s.SummaryModel.String)
+			if s.SummaryTokens.Valid {
+				fmt.Printf(", %d tokens", s.SummaryTokens.Int64)
+			}
+			fmt.Println(")")
+		}
 	}
 
 	// --- Events block ---

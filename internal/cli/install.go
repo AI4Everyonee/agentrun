@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jeevan/agentrun/internal/install"
+	"github.com/AI4Everyonee/agentrun/internal/install"
 )
 
 // runInstall handles `agentrun install`. It writes the global hook config to

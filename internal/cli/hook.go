@@ -15,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/collector"
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/gitmeta"
-	"github.com/jeevan/agentrun/internal/hooks"
-	"github.com/jeevan/agentrun/internal/ids"
-	"github.com/jeevan/agentrun/internal/redact"
-	"github.com/jeevan/agentrun/internal/userident"
-	"github.com/jeevan/agentrun/internal/validation"
+	"github.com/AI4Everyonee/agentrun/internal/collector"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/gitmeta"
+	"github.com/AI4Everyonee/agentrun/internal/hooks"
+	"github.com/AI4Everyonee/agentrun/internal/ids"
+	"github.com/AI4Everyonee/agentrun/internal/redact"
+	"github.com/AI4Everyonee/agentrun/internal/userident"
+	"github.com/AI4Everyonee/agentrun/internal/validation"
 )
 
 // defaultMaxPayloadBytes is the cap before truncation. Override via
@@ -185,6 +185,7 @@ func runHook(args []string) error {
 				fmt.Fprintf(os.Stderr, "agentrun hook: finalize session: %v\n", finalizeErr)
 			}
 			captureNativeGitDiff(d, sessionID, cwd, endSHA)
+			scheduleSummary(sessionID)
 		}
 	}
 

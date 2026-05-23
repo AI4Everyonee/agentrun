@@ -56,21 +56,43 @@ Every event carries `session_id`, `sequence`, `ts`, `source`, `type`, and the ra
 
 ## Install
 
-Requires Go 1.22+ (or grab a pre-built binary from a release).
+**One-liner** (macOS or Linux, amd64 or arm64):
 
 ```bash
-go install github.com/jeevan/agentrun/cmd/agentrun@latest
-# or build from source:
-git clone https://github.com/jeevan/agentrun
+curl -fsSL https://raw.githubusercontent.com/AI4Everyonee/agentrun/main/install.sh | bash
+```
+
+This downloads the latest binary from GitHub releases, drops it in
+`/usr/local/bin` (or `~/.local/bin` if not writable), and runs
+`agentrun install` to register the global Claude + Codex hooks.
+
+> **Note** — while the repo is private, you'll need a GitHub token with
+> read access: `GH_TOKEN=ghp_… curl -fsSL … | bash`.
+
+**Other options:**
+
+```bash
+# Pin a specific version
+AGENTRUN_VERSION=v0.4.0 curl -fsSL .../install.sh | bash
+
+# Install the binary only, skip hook setup
+AGENTRUN_SKIP_HOOKS=1 curl -fsSL .../install.sh | bash
+
+# Build from source (requires Go 1.22+)
+go install github.com/AI4Everyonee/agentrun/cmd/agentrun@latest
+agentrun install
+
+# Or clone:
+git clone https://github.com/AI4Everyonee/agentrun
 cd agentrun
 CGO_ENABLED=0 go build -o /usr/local/bin/agentrun ./cmd/agentrun
-```
-
-Then run the one-time global install:
-
-```bash
 agentrun install
 ```
+
+**Optional: OpenAI session summaries.** Set `OPENAI_API_KEY` in your shell
+rc; every session gets a one-paragraph summary at end-of-session by
+calling `gpt-5.4-mini` (override with `AGENTRUN_SUMMARY_MODEL`). Without
+the key, the summarizer is a no-op — everything else still records.
 
 This:
 - Merges hook entries into `~/.claude/settings.json` (your existing settings preserved; original backed up to `.bak.<ts>`).

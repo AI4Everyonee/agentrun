@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // newGCTestEnv creates a temp directory acting as the agentrun DB dir,

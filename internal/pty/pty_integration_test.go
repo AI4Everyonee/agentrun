@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/jeevan/agentrun/internal/pty"
+	"github.com/AI4Everyonee/agentrun/internal/pty"
 )
 
 // TestPTYIntegration spawns /bin/cat under a PTY and verifies that Start

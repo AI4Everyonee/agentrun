@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/config"
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/config"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runGC implements `agentrun gc [--older-than <duration>] [--dry-run]`.

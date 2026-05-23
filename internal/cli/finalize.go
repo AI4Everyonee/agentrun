@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // runFinalizeIdle sweeps sessions where status='running' and whose last event
@@ -34,11 +34,17 @@ func runFinalizeIdle(args []string) error {
 	}
 	defer d.Close()
 
-	count, err := db.FinalizeIdleSessions(d, *olderThan)
+	ids, err := db.FinalizeIdleSessions(d, *olderThan)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("agentrun: finalized %d idle sessions older than %s\n", count, *olderThan)
+	fmt.Printf("agentrun: finalized %d idle sessions older than %s\n", len(ids), *olderThan)
+
+	// Schedule summarization for each freshly-finalized session. Detached so
+	// the CLI exits immediately even when summarizing dozens of stale rows.
+	for _, sid := range ids {
+		scheduleSummary(sid)
+	}
 	return nil
 }

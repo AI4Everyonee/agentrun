@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/jeevan/agentrun/internal/pty"
+	"github.com/AI4Everyonee/agentrun/internal/pty"
 )
 
 // TestStartRejectsUnset verifies that Start returns an error when cmd has no

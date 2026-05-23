@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/recorder"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/recorder"
 )
 
 // Server is the long-lived collector process that listens on a Unix domain

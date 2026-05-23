@@ -16,10 +16,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/gitmeta"
-	"github.com/jeevan/agentrun/internal/ids"
-	"github.com/jeevan/agentrun/internal/tokenparse"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/gitmeta"
+	"github.com/AI4Everyonee/agentrun/internal/ids"
+	"github.com/AI4Everyonee/agentrun/internal/tokenparse"
 )
 
 // Event is the in-memory representation of an event before insertion.

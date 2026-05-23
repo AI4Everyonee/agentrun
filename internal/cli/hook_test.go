@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
-	"github.com/jeevan/agentrun/internal/ids"
+	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/ids"
 )
 
 // setupTestDB creates a temp DB with a session and session_summary row for testing.

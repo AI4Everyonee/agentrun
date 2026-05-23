@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/db"
 )
 
 // newTestRecorder opens a fresh DB in a temp dir and starts a Recorder.

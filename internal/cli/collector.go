@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jeevan/agentrun/internal/collector"
+	"github.com/AI4Everyonee/agentrun/internal/collector"
 )
 
 // runCollector implements `agentrun collector [start|stop|status]`.
