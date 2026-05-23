@@ -398,6 +398,7 @@ func (r *Recorder) tryWriteBatch(batch []Event) error {
 		return fmt.Errorf("writeBatch: prepare stmt: %w", err)
 	}
 
+	fileModifications := 0
 	for _, e := range batch {
 		nextSeq++
 		redacted, version := r.redactor.Redact(e.Type, e.Payload)
@@ -410,9 +411,24 @@ func (r *Recorder) tryWriteBatch(batch []Event) error {
 			stmt.Close()
 			return fmt.Errorf("writeBatch: exec: %w", err)
 		}
+		if e.Type == "file.modified" {
+			fileModifications++
+		}
 	}
 
 	stmt.Close()
+
+	// Roll up filesystem changes into the session_summary counter in the same
+	// transaction so a partial commit can't leave the counter desynced.
+	if fileModifications > 0 {
+		if _, err := tx.Exec(
+			`UPDATE session_summary SET files_changed = files_changed + ? WHERE session_id = ?`,
+			fileModifications, r.sessionID,
+		); err != nil {
+			return fmt.Errorf("writeBatch: bump files_changed: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("writeBatch: commit: %w", err)
 	}

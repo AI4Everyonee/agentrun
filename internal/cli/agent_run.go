@@ -13,6 +13,7 @@ import (
 	"github.com/jeevan/agentrun/internal/agent"
 	"github.com/jeevan/agentrun/internal/config"
 	"github.com/jeevan/agentrun/internal/db"
+	"github.com/jeevan/agentrun/internal/fswatcher"
 	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/pty"
 	"github.com/jeevan/agentrun/internal/recorder"
@@ -84,6 +85,21 @@ func runAgent(agentName string, args []string) error {
 	//     and AGENTRUN_DB_PATH into the child env. The global hook command sees
 	//     these and attributes events to the wrapper's session row (with PTY
 	//     artifacts) instead of synthesizing a native session ID.
+
+	// 6c. Start the filesystem watcher (wrapper-only — native sessions don't
+	//     get this since there's no long-lived process to host fsnotify).
+	//     Failure here is non-fatal; we just skip fs events for this session.
+	var fsw *fswatcher.Watcher
+	if w, fsErr := fswatcher.New(cwd, rec); fsErr == nil {
+		if startErr := w.Start(); startErr == nil {
+			fsw = w
+		} else {
+			fmt.Fprintf(os.Stderr, "agentrun: fswatcher start failed (continuing without fs events): %v\n", startErr)
+			_ = w.Close()
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "agentrun: fswatcher init failed (continuing without fs events): %v\n", fsErr)
+	}
 
 	// 7. Open artifact files for the tee writers.
 	//    recorder.Start already created the files; we open them for appending.
@@ -158,6 +174,13 @@ func runAgent(agentName string, args []string) error {
 	// 15. Flush chunkers BEFORE closing recorder so the last bytes get emitted.
 	stdoutChunker.Flush()
 	stdinChunker.Flush()
+
+	// 15b. Stop the filesystem watcher (drains pending events into the recorder).
+	if fsw != nil {
+		if err := fsw.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "agentrun: fswatcher close warning: %v\n", err)
+		}
+	}
 
 	// 16. Capture end-of-session git commit SHA, then finalize the recorder.
 	endSHA := gitmeta.HeadCommit(cwd)
