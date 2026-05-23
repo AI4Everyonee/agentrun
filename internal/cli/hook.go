@@ -20,6 +20,7 @@ import (
 	"github.com/jeevan/agentrun/internal/hooks"
 	"github.com/jeevan/agentrun/internal/ids"
 	"github.com/jeevan/agentrun/internal/redact"
+	"github.com/jeevan/agentrun/internal/userident"
 	"github.com/jeevan/agentrun/internal/validation"
 )
 
@@ -466,6 +467,7 @@ func ensureNativeSessionRow(d *sql.DB, sessionID, agentName string, payload map[
 		StartCommitSHA: nullStr(snap.HeadSHA),
 		StartedAt:      time.Now().UTC(),
 		MetadataJSON:   `{"source":"native_hook"}`,
+		UserName:       nullStr(userident.Detect()),
 	}
 	if err := db.InsertSession(d, sess); err != nil {
 		// A peer hook subprocess may have raced us. Treat as success — the

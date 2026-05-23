@@ -18,6 +18,7 @@ import (
 	"github.com/jeevan/agentrun/internal/pty"
 	"github.com/jeevan/agentrun/internal/recorder"
 	"github.com/jeevan/agentrun/internal/redact"
+	"github.com/jeevan/agentrun/internal/userident"
 )
 
 // runAgent is the shared wrapper logic for all agent subcommands.
@@ -64,6 +65,7 @@ func runAgent(agentName string, args []string) error {
 	rec, err := recorder.Start(d, recorder.StartOpts{
 		Agent:          agentName,
 		AgentVersion:   version,
+		UserName:       userident.Detect(),
 		Cwd:            cwd,
 		RepoRoot:       snap.RepoRoot,
 		Branch:         snap.Branch,

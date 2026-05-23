@@ -44,15 +44,51 @@ func Open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Migrate executes the embedded schema.sql against db. Idempotent because every
-// CREATE TABLE/INDEX statement in schema.sql uses IF NOT EXISTS.
-// Some PRAGMAs in schema.sql are redundant with the DSN — that is fine; PRAGMA
-// execution is idempotent.
+// Migrate executes the embedded schema.sql against db, then applies any
+// pending migrations from migrations.go in order.
+//
+// The base schema.sql is idempotent (every CREATE uses IF NOT EXISTS), so
+// running Migrate against a fresh or already-initialized DB is safe. The
+// migration sequence is tracked in the schema_versions table; each migration
+// runs at most once per DB.
+//
+// Some PRAGMAs in schema.sql are redundant with the DSN — that is fine.
 func Migrate(db *sql.DB) error {
 	if _, err := db.Exec(schema.SQL); err != nil {
 		return fmt.Errorf("db.Migrate: exec schema: %w", err)
 	}
+	if err := applyMigrations(db); err != nil {
+		return fmt.Errorf("db.Migrate: apply migrations: %w", err)
+	}
 	return nil
+}
+
+// CurrentSchemaVersion returns the highest migration version recorded in the
+// database. Returns 0 if the schema_versions table does not exist yet or has
+// no rows. Used by `agentrun doctor` for sanity checks.
+func CurrentSchemaVersion(db *sql.DB) (int, error) {
+	var v int
+	row := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_versions`)
+	if err := row.Scan(&v); err != nil {
+		// schema_versions itself may not exist on very-old DBs; treat as 0.
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return v, nil
+}
+
+// LatestSchemaVersion returns the highest version known to this binary —
+// i.e., the version a fresh DB would reach after Migrate.
+func LatestSchemaVersion() int {
+	max := 0
+	for _, m := range migrations {
+		if m.Version > max {
+			max = m.Version
+		}
+	}
+	return max
 }
 
 // OpenReadWrite opens (but does NOT migrate) an existing SQLite database.

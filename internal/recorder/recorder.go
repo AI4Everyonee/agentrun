@@ -31,6 +31,7 @@ type Event struct {
 type StartOpts struct {
 	Agent          string
 	AgentVersion   string
+	UserName       string // user identity attached to this session (empty = NULL)
 	Cwd            string
 	RepoRoot       string
 	Branch         string
@@ -82,6 +83,7 @@ func Start(d *sql.DB, opts StartOpts) (*Recorder, error) {
 		StartCommitSHA: nullStr(opts.StartCommitSHA),
 		StartedAt:      time.Now().UTC(),
 		MetadataJSON:   "{}",
+		UserName:       nullStr(opts.UserName),
 	}
 
 	// Step 3: insert session row.

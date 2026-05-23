@@ -34,6 +34,26 @@ func Run(args []string) error {
 		return runInstall(args[1:])
 	case "uninstall":
 		return runUninstall(args[1:])
+	case "gc":
+		return runGC(args[1:])
+	case "watch":
+		return runWatch(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
+	case "stats":
+		return runStats(args[1:])
+	case "diff":
+		return runDiff(args[1:])
+	case "search":
+		return runSearch(args[1:])
+	case "replay":
+		return runReplay(args[1:])
+	case "compare":
+		return runCompare(args[1:])
+	case "tag":
+		return runTag(args[1:])
+	case "collector":
+		return runCollector(args[1:])
 	case "help", "-h", "--help":
 		return usage()
 	default:
@@ -52,7 +72,17 @@ Usage:
   agentrun sessions               List recorded sessions
   agentrun show <session_id>      Show summary for a session
   agentrun export <session_id>    Export session as JSONL (1 line per event)
+  agentrun diff <session_id>      Pipe captured git.diff through $PAGER
+  agentrun search <query>         Full-text search across event payloads + prompts
+  agentrun stats [--repo <dir>]   Per-agent / per-repo usage rollup
+  agentrun compare <id_a> <id_b>  Side-by-side event timeline of two sessions
+  agentrun replay <session_id>    Re-emit captured PTY bytes (wrapped sessions only)
+  agentrun watch                  Tail events live across all sessions
+  agentrun tag <session_id> <tag> Annotate a session with a free-text tag
   agentrun finalize-idle          Sweep stale 'running' sessions (e.g. Codex never-ends)
+  agentrun gc [--older-than 30d]  Delete old sessions + artifacts
+  agentrun doctor                 Verify installation health
+  agentrun collector [start|stop] Long-lived hook receiver via Unix socket
   agentrun hook <agent> <event>   Internal: invoked by claude/codex hooks (do not call directly)
   agentrun help                   Show this help`)
 	return ErrUsage

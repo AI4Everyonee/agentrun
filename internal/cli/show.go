@@ -64,6 +64,15 @@ func runShow(args []string) error {
 	} else {
 		fmt.Printf("Agent: %s\n", s.Agent)
 	}
+	if s.UserName.Valid && s.UserName.String != "" {
+		fmt.Printf("User: %s\n", s.UserName.String)
+	}
+	if s.Model.Valid && s.Model.String != "" {
+		fmt.Printf("Model: %s\n", s.Model.String)
+	}
+	if s.TokensUsed.Valid {
+		fmt.Printf("Tokens: %d\n", s.TokensUsed.Int64)
+	}
 	if s.RepoRoot.Valid {
 		fmt.Printf("Repo: %s\n", s.RepoRoot.String)
 	}

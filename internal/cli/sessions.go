@@ -36,8 +36,22 @@ func runSessions(args []string) error {
 		return nil
 	}
 
+	// Show USER column only when at least one row carries a user_name (otherwise
+	// the column wastes space on single-user laptops).
+	showUser := false
+	for _, r := range rows {
+		if r.UserName.Valid && r.UserName.String != "" {
+			showUser = true
+			break
+		}
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "SESSION ID\tAGENT\tREPO\tSTARTED\tSTATUS")
+	if showUser {
+		fmt.Fprintln(w, "SESSION ID\tAGENT\tUSER\tREPO\tSTARTED\tSTATUS")
+	} else {
+		fmt.Fprintln(w, "SESSION ID\tAGENT\tREPO\tSTARTED\tSTATUS")
+	}
 	for _, r := range rows {
 		repo := r.RepoRoot.String
 		if !r.RepoRoot.Valid || repo == "" {
@@ -47,13 +61,28 @@ func runSessions(args []string) error {
 		if !r.Status.Valid {
 			status = "?"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			truncate(r.ID, 30),
-			truncate(r.Agent, 8),
-			truncate(repo, 28),
-			r.StartedAt.Local().Format("2006-01-02 15:04:05"),
-			truncate(status, 12),
-		)
+		if showUser {
+			user := r.UserName.String
+			if !r.UserName.Valid {
+				user = "-"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				truncate(r.ID, 30),
+				truncate(r.Agent, 8),
+				truncate(user, 20),
+				truncate(repo, 28),
+				r.StartedAt.Local().Format("2006-01-02 15:04:05"),
+				truncate(status, 12),
+			)
+		} else {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				truncate(r.ID, 30),
+				truncate(r.Agent, 8),
+				truncate(repo, 28),
+				r.StartedAt.Local().Format("2006-01-02 15:04:05"),
+				truncate(status, 12),
+			)
+		}
 	}
 	return w.Flush()
 }

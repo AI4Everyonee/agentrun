@@ -46,6 +46,14 @@ type SessionRow struct {
 	TranscriptPath sql.NullString
 	PID            sql.NullInt64
 	MetadataJSON   string
+
+	// Added by migrations (see internal/db/migrations.go):
+	//   v1: user_name      — capture identity for multi-user cloud syncs
+	//   v2: tokens_used,   — token + cost rollup (parsed from PTY where possible)
+	//       cost_usd_cents
+	UserName     sql.NullString
+	TokensUsed   sql.NullInt64
+	CostUSDCents sql.NullInt64
 }
 
 // EventRow maps to the events table.
@@ -102,6 +110,7 @@ type SessionListRow struct {
 	Cwd       string
 	StartedAt time.Time
 	Status    sql.NullString
+	UserName  sql.NullString
 }
 
 // fmtTime formats t as RFC3339Nano UTC for SQLite TEXT columns.
@@ -123,8 +132,9 @@ func InsertSession(db *sql.DB, s SessionRow) error {
 	const q = `INSERT INTO sessions (
 		id, agent, agent_version, model, permission_mode,
 		cwd, repo_root, branch, start_commit_sha, end_commit_sha,
-		started_at, ended_at, exit_code, transcript_path, pid, metadata_json
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		started_at, ended_at, exit_code, transcript_path, pid, metadata_json,
+		user_name, tokens_used, cost_usd_cents
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	var endedAt interface{}
 	if s.EndedAt.Valid {
@@ -136,11 +146,46 @@ func InsertSession(db *sql.DB, s SessionRow) error {
 		s.Cwd, s.RepoRoot, s.Branch, s.StartCommitSHA, s.EndCommitSHA,
 		fmtTime(s.StartedAt), endedAt, s.ExitCode, s.TranscriptPath, s.PID,
 		s.MetadataJSON,
+		s.UserName, s.TokensUsed, s.CostUSDCents,
 	)
 	if err != nil {
 		return fmt.Errorf("InsertSession: %w", err)
 	}
 	return nil
+}
+
+// UpdateSessionUserName sets sessions.user_name. Idempotent (overwrites).
+// No-op on empty value. Useful when the wrapper doesn't know the user at
+// row-creation time but a later hook payload reveals it.
+func UpdateSessionUserName(d *sql.DB, sessionID, userName string) error {
+	if userName == "" {
+		return nil
+	}
+	return execWithRetry(d, `UPDATE sessions SET user_name = ? WHERE id = ?`, userName, sessionID)
+}
+
+// UpdateSessionTokensAndCost overwrites the rollup columns. Either value may
+// be -1 to leave the existing value untouched.
+func UpdateSessionTokensAndCost(d *sql.DB, sessionID string, tokens, costCents int64) error {
+	switch {
+	case tokens < 0 && costCents < 0:
+		return nil
+	case tokens >= 0 && costCents >= 0:
+		return execWithRetry(d,
+			`UPDATE sessions SET tokens_used = ?, cost_usd_cents = ? WHERE id = ?`,
+			tokens, costCents, sessionID,
+		)
+	case tokens >= 0:
+		return execWithRetry(d,
+			`UPDATE sessions SET tokens_used = ? WHERE id = ?`,
+			tokens, sessionID,
+		)
+	default:
+		return execWithRetry(d,
+			`UPDATE sessions SET cost_usd_cents = ? WHERE id = ?`,
+			costCents, sessionID,
+		)
+	}
 }
 
 // UpdateSessionPID updates the pid column for a session.
@@ -192,7 +237,7 @@ func FinalizeSession(db *sql.DB, sessionID, endCommitSHA, status string, exitCod
 // with session_summary so sessions without a summary row still appear (defensive).
 func ListSessions(db *sql.DB, limit int) ([]SessionListRow, error) {
 	const q = `
-		SELECT s.id, s.agent, s.repo_root, s.cwd, s.started_at, ss.status
+		SELECT s.id, s.agent, s.repo_root, s.cwd, s.started_at, ss.status, s.user_name
 		FROM sessions s
 		LEFT JOIN session_summary ss ON ss.session_id = s.id
 		ORDER BY s.started_at DESC
@@ -208,7 +253,7 @@ func ListSessions(db *sql.DB, limit int) ([]SessionListRow, error) {
 	for rows.Next() {
 		var r SessionListRow
 		var startedAt string
-		if err := rows.Scan(&r.ID, &r.Agent, &r.RepoRoot, &r.Cwd, &startedAt, &r.Status); err != nil {
+		if err := rows.Scan(&r.ID, &r.Agent, &r.RepoRoot, &r.Cwd, &startedAt, &r.Status, &r.UserName); err != nil {
 			return nil, fmt.Errorf("ListSessions: scan: %w", err)
 		}
 		r.StartedAt, err = parseTime(startedAt)
@@ -229,7 +274,8 @@ func GetSession(db *sql.DB, sessionID string) (SessionRow, error) {
 	const q = `SELECT
 		id, agent, agent_version, model, permission_mode,
 		cwd, repo_root, branch, start_commit_sha, end_commit_sha,
-		started_at, ended_at, exit_code, transcript_path, pid, metadata_json
+		started_at, ended_at, exit_code, transcript_path, pid, metadata_json,
+		user_name, tokens_used, cost_usd_cents
 	FROM sessions WHERE id=?`
 
 	row := db.QueryRow(q, sessionID)
@@ -243,6 +289,7 @@ func GetSession(db *sql.DB, sessionID string) (SessionRow, error) {
 		&s.Cwd, &s.RepoRoot, &s.Branch, &s.StartCommitSHA, &s.EndCommitSHA,
 		&startedAt, &endedAt, &s.ExitCode, &s.TranscriptPath, &s.PID,
 		&s.MetadataJSON,
+		&s.UserName, &s.TokensUsed, &s.CostUSDCents,
 	)
 	if err != nil {
 		// Return sql.ErrNoRows directly so callers can distinguish not-found.
