@@ -1,0 +1,4 @@
+/agentrun
+/dist/
+.DS_Store
+.env

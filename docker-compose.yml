@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: agentrun-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentrun
+      POSTGRES_PASSWORD: agentrun
+      POSTGRES_DB: agentrun
+    ports:
+      - "5433:5432"   # 5433 host → 5432 container, avoids collision with native Postgres
+    volumes:
+      - agentrun_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentrun -d agentrun"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  agentrun_pgdata:
