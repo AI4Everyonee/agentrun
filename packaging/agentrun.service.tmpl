@@ -1,0 +1,16 @@
+[Unit]
+Description=agentrun — Claude Code / Codex session ingester
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__BIN__ watch
+Restart=always
+RestartSec=10
+Environment=AGENTRUN_CONFIG=__CONFIG__
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
