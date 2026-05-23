@@ -64,10 +64,8 @@ curl -fsSL https://raw.githubusercontent.com/AI4Everyonee/agentrun/main/install.
 
 This downloads the latest binary from GitHub releases, drops it in
 `/usr/local/bin` (or `~/.local/bin` if not writable), and runs
-`agentrun install` to register the global Claude + Codex hooks.
-
-> **Note** — while the repo is private, you'll need a GitHub token with
-> read access: `GH_TOKEN=ghp_… curl -fsSL … | bash`.
+`agentrun install` to register the global Claude + Codex hooks. No auth
+required — the repo is public.
 
 **Other options:**
 
