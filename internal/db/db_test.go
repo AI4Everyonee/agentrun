@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -461,4 +462,422 @@ func TestArtifactInsertUpdateList(t *testing.T) {
 	if a2.ContentHash.Valid {
 		t.Errorf("art_2 ContentHash: expected NULL, got %v", a2.ContentHash)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 tests — InsertEventWithAutoSeq, IncrementSummaryCounter,
+// UpdateSessionModel, UpdateSessionTranscriptPath, OpenReadWrite
+// ---------------------------------------------------------------------------
+
+// newTestDBWithSession opens a fresh DB and inserts one session + session_summary row.
+// Returns the db and the session id. Fails the test on any error.
+func newTestDBWithSession(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	db := newTestDB(t)
+	now := time.Now().UTC().Round(time.Microsecond)
+	sid := "s_p2test"
+	sess := makeSession(sid, now)
+	// Clear transcript_path so we can test UpdateSessionTranscriptPath separately.
+	sess.TranscriptPath = sql.NullString{}
+	if err := InsertSession(db, sess); err != nil {
+		t.Fatalf("newTestDBWithSession: InsertSession: %v", err)
+	}
+	if err := InsertSessionSummary(db, sid, "running"); err != nil {
+		t.Fatalf("newTestDBWithSession: InsertSessionSummary: %v", err)
+	}
+	return db, sid
+}
+
+// TestInsertEventWithAutoSeq_AssignsConsecutiveSeq inserts 5 events via
+// InsertEventWithAutoSeq and verifies the sequences are 1,2,3,4,5.
+func TestInsertEventWithAutoSeq_AssignsConsecutiveSeq(t *testing.T) {
+	db, sid := newTestDBWithSession(t)
+
+	now := time.Now().UTC()
+	var ids []string
+	for i := 0; i < 5; i++ {
+		evtID, err := InsertEventWithAutoSeq(db, sid, now, "hook", "tool.pre_use", []byte(`{}`), "noop-1")
+		if err != nil {
+			t.Fatalf("InsertEventWithAutoSeq i=%d: %v", i, err)
+		}
+		if evtID == "" {
+			t.Fatalf("InsertEventWithAutoSeq i=%d: returned empty event ID", i)
+		}
+		ids = append(ids, evtID)
+	}
+
+	// Each returned ID must be unique.
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		if seen[id] {
+			t.Errorf("duplicate event ID returned: %q", id)
+		}
+		seen[id] = true
+	}
+
+	// Sequences must be 1,2,3,4,5 in order.
+	rows, err := db.Query(`SELECT sequence FROM events WHERE session_id=? ORDER BY sequence`, sid)
+	if err != nil {
+		t.Fatalf("query sequences: %v", err)
+	}
+	defer rows.Close()
+
+	wantSeq := int64(1)
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatalf("scan sequence: %v", err)
+		}
+		if seq != wantSeq {
+			t.Errorf("sequence: got %d, want %d", seq, wantSeq)
+		}
+		wantSeq++
+	}
+	if wantSeq != 6 {
+		t.Errorf("expected 5 events, counted %d", wantSeq-1)
+	}
+}
+
+// TestInsertEventWithAutoSeq_ConcurrentNoCollisions spawns 50 goroutines, each
+// inserting 4 events (200 total) against the same session_id. Verifies no UNIQUE
+// constraint violations leaked to callers, COUNT(*)==200, and all sequences are
+// distinct.
+//
+// Note: MAX(sequence) >= 200 but gaps are allowed under contention — a retry
+// re-reads MAX and may skip a slot. The UNIQUE constraint guarantees no
+// duplicates; it does not guarantee a dense sequence.
+//
+// Each goroutine opens its own *sql.DB via OpenReadWrite (SetMaxOpenConns=1)
+// to mirror the production model where each hook invocation is a separate OS
+// process with its own connection. This ensures the busy_timeout + retry
+// envelope gets exercised rather than goroutines stacking up inside the same
+// connection pool.
+func TestInsertEventWithAutoSeq_ConcurrentNoCollisions(t *testing.T) {
+	// First, create and migrate the DB using db.Open.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "concurrent.db")
+	seedDB, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	now := time.Now().UTC().Round(time.Microsecond)
+	sid := "s_concurrent"
+	sess := makeSession(sid, now)
+	sess.TranscriptPath = sql.NullString{}
+	if err := InsertSession(seedDB, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := InsertSessionSummary(seedDB, sid, "running"); err != nil {
+		t.Fatalf("InsertSessionSummary: %v", err)
+	}
+	seedDB.Close()
+
+	const goroutines = 50
+	const eventsPerGoroutine = 4
+	const total = goroutines * eventsPerGoroutine
+
+	errs := make(chan error, total)
+	var wg sync.WaitGroup
+	nowEvt := time.Now().UTC()
+
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			// Each goroutine opens its own connection, mirroring a separate
+			// hook subprocess. SetMaxOpenConns(1) ensures serialization at
+			// the SQLite level and lets busy_timeout do its job.
+			d, err := OpenReadWrite(path)
+			if err != nil {
+				errs <- fmt.Errorf("OpenReadWrite: %w", err)
+				return
+			}
+			defer d.Close()
+			for i := 0; i < eventsPerGoroutine; i++ {
+				_, err := InsertEventWithAutoSeq(d, sid, nowEvt, "hook", "tool.pre_use", []byte(`{}`), "noop-1")
+				if err != nil {
+					errs <- err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("goroutine insert error: %v", err)
+	}
+
+	// Reopen for reads.
+	readDB, err := OpenReadWrite(path)
+	if err != nil {
+		t.Fatalf("OpenReadWrite for read: %v", err)
+	}
+	defer readDB.Close()
+
+	// Count must equal total.
+	var count int
+	if err := readDB.QueryRow(`SELECT COUNT(*) FROM events WHERE session_id=?`, sid).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != total {
+		t.Errorf("event count: got %d, want %d", count, total)
+	}
+
+	// MAX(sequence) must be >= total.
+	var maxSeq int64
+	if err := readDB.QueryRow(`SELECT MAX(sequence) FROM events WHERE session_id=?`, sid).Scan(&maxSeq); err != nil {
+		t.Fatalf("max seq query: %v", err)
+	}
+	if maxSeq < int64(total) {
+		t.Errorf("MAX(sequence)=%d, want >= %d", maxSeq, total)
+	}
+
+	// No two rows may share the same sequence (UNIQUE constraint preserved).
+	rows, err := readDB.Query(`SELECT sequence FROM events WHERE session_id=? ORDER BY sequence`, sid)
+	if err != nil {
+		t.Fatalf("sequence scan query: %v", err)
+	}
+	defer rows.Close()
+
+	var prev int64 = -1
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatalf("scan sequence: %v", err)
+		}
+		if seq == prev {
+			t.Errorf("duplicate sequence %d found", seq)
+		}
+		prev = seq
+	}
+}
+
+// TestIncrementSummaryCounter_AllowlistRejectsBadInput verifies that columns
+// not in the allowlist return a non-nil error mentioning "allowlist", while an
+// allowed column succeeds and the DB value is incremented.
+func TestIncrementSummaryCounter_AllowlistRejectsBadInput(t *testing.T) {
+	db, sid := newTestDBWithSession(t)
+
+	// Bad column must be rejected.
+	err := IncrementSummaryCounter(db, sid, "exit_code")
+	if err == nil {
+		t.Fatal("expected error for disallowed counter, got nil")
+	}
+	if !errContains(err, "allowlist") {
+		t.Errorf("error %q should mention 'allowlist'", err.Error())
+	}
+
+	// Good column must succeed.
+	if err := IncrementSummaryCounter(db, sid, "tool_calls"); err != nil {
+		t.Fatalf("IncrementSummaryCounter(tool_calls): %v", err)
+	}
+
+	// Verify tool_calls == 1.
+	var tc int
+	if err := db.QueryRow(`SELECT tool_calls FROM session_summary WHERE session_id=?`, sid).Scan(&tc); err != nil {
+		t.Fatalf("query tool_calls: %v", err)
+	}
+	if tc != 1 {
+		t.Errorf("tool_calls: got %d, want 1", tc)
+	}
+}
+
+// TestIncrementSummaryCounter_AtomicUnderConcurrency runs 100 goroutines each
+// calling IncrementSummaryCounter for tool_calls. The final value must be 100.
+func TestIncrementSummaryCounter_AtomicUnderConcurrency(t *testing.T) {
+	db, sid := newTestDBWithSession(t)
+
+	const goroutines = 100
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			if err := IncrementSummaryCounter(db, sid, "tool_calls"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("goroutine increment error: %v", err)
+	}
+
+	var tc int
+	if err := db.QueryRow(`SELECT tool_calls FROM session_summary WHERE session_id=?`, sid).Scan(&tc); err != nil {
+		t.Fatalf("query tool_calls: %v", err)
+	}
+	if tc != goroutines {
+		t.Errorf("tool_calls: got %d, want %d", tc, goroutines)
+	}
+}
+
+// TestUpdateSessionModel_RoundTrip verifies UpdateSessionModel sets the model
+// column, and that an empty-string call is a no-op.
+func TestUpdateSessionModel_RoundTrip(t *testing.T) {
+	db := newTestDB(t)
+
+	now := time.Now().UTC().Round(time.Microsecond)
+	sid := "s_modeltest"
+	sess := makeSession(sid, now)
+	sess.Model = sql.NullString{} // start with empty model
+	if err := InsertSession(db, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	// Set the model.
+	if err := UpdateSessionModel(db, sid, "claude-sonnet-4-7"); err != nil {
+		t.Fatalf("UpdateSessionModel: %v", err)
+	}
+
+	got, err := GetSession(db, sid)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !got.Model.Valid || got.Model.String != "claude-sonnet-4-7" {
+		t.Errorf("Model: got %v, want {claude-sonnet-4-7 true}", got.Model)
+	}
+
+	// Empty-string call must be a no-op (returns nil, does not overwrite).
+	if err := UpdateSessionModel(db, sid, ""); err != nil {
+		t.Fatalf("UpdateSessionModel empty: %v", err)
+	}
+
+	got2, err := GetSession(db, sid)
+	if err != nil {
+		t.Fatalf("GetSession after empty call: %v", err)
+	}
+	if !got2.Model.Valid || got2.Model.String != "claude-sonnet-4-7" {
+		t.Errorf("Model after empty call: got %v, want {claude-sonnet-4-7 true}", got2.Model)
+	}
+}
+
+// TestUpdateSessionTranscriptPath_NullGuard verifies the first writer wins
+// (WHERE transcript_path IS NULL guard) and empty path is a no-op.
+func TestUpdateSessionTranscriptPath_NullGuard(t *testing.T) {
+	db := newTestDB(t)
+
+	now := time.Now().UTC().Round(time.Microsecond)
+	sid := "s_tptest"
+	sess := makeSession(sid, now)
+	sess.TranscriptPath = sql.NullString{} // start NULL
+	if err := InsertSession(db, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	// First write — should succeed.
+	if err := UpdateSessionTranscriptPath(db, sid, "/tmp/a.jsonl"); err != nil {
+		t.Fatalf("UpdateSessionTranscriptPath first: %v", err)
+	}
+
+	got, err := GetSession(db, sid)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !got.TranscriptPath.Valid || got.TranscriptPath.String != "/tmp/a.jsonl" {
+		t.Errorf("TranscriptPath: got %v, want {/tmp/a.jsonl true}", got.TranscriptPath)
+	}
+
+	// Second write with a different path — returns nil but WHERE IS NULL prevents overwrite.
+	if err := UpdateSessionTranscriptPath(db, sid, "/tmp/b.jsonl"); err != nil {
+		t.Fatalf("UpdateSessionTranscriptPath second: %v", err)
+	}
+
+	got2, err := GetSession(db, sid)
+	if err != nil {
+		t.Fatalf("GetSession after second write: %v", err)
+	}
+	if !got2.TranscriptPath.Valid || got2.TranscriptPath.String != "/tmp/a.jsonl" {
+		t.Errorf("TranscriptPath after second write: got %v, want {/tmp/a.jsonl true} (first wins)", got2.TranscriptPath)
+	}
+
+	// Empty-string call must be a no-op (returns nil).
+	if err := UpdateSessionTranscriptPath(db, sid, ""); err != nil {
+		t.Fatalf("UpdateSessionTranscriptPath empty: %v", err)
+	}
+}
+
+// TestOpenReadWrite_Basic verifies that OpenReadWrite can read and write an
+// existing, migrated database.
+func TestOpenReadWrite_Basic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rw_test.db")
+
+	// Create and migrate via db.Open.
+	db1, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	now := time.Now().UTC().Round(time.Microsecond)
+	sid := "s_rwtest"
+	sess := makeSession(sid, now)
+	sess.TranscriptPath = sql.NullString{}
+	if err := InsertSession(db1, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := InsertSessionSummary(db1, sid, "running"); err != nil {
+		t.Fatalf("InsertSessionSummary: %v", err)
+	}
+	db1.Close()
+
+	// Reopen without migration.
+	db2, err := OpenReadWrite(path)
+	if err != nil {
+		t.Fatalf("OpenReadWrite: %v", err)
+	}
+	defer db2.Close()
+
+	// Reading must work.
+	gotSess, err := GetSession(db2, sid)
+	if err != nil {
+		t.Fatalf("GetSession via OpenReadWrite: %v", err)
+	}
+	if gotSess.ID != sid {
+		t.Errorf("session ID: got %q, want %q", gotSess.ID, sid)
+	}
+
+	// Writing must work.
+	if err := IncrementSummaryCounter(db2, sid, "tool_calls"); err != nil {
+		t.Fatalf("IncrementSummaryCounter via OpenReadWrite: %v", err)
+	}
+
+	var tc int
+	if err := db2.QueryRow(`SELECT tool_calls FROM session_summary WHERE session_id=?`, sid).Scan(&tc); err != nil {
+		t.Fatalf("query tool_calls: %v", err)
+	}
+	if tc != 1 {
+		t.Errorf("tool_calls: got %d, want 1", tc)
+	}
+}
+
+// TestOpenReadWrite_MissingFile verifies that OpenReadWrite on a missing file
+// "fails loudly" — at minimum any subsequent query returns a non-nil error.
+// (modernc.org/sqlite may not error on Open itself for missing files — it's
+// lazy about file creation — so we verify the query fails.)
+func TestOpenReadWrite_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent.db")
+
+	// Open may or may not fail (SQLite is lazy).
+	db, err := OpenReadWrite(path)
+	if err != nil {
+		// If Open itself fails, the test passes.
+		t.Logf("OpenReadWrite returned error (acceptable): %v", err)
+		return
+	}
+	defer db.Close()
+
+	// Any query on an unmigrated/missing-schema DB must fail.
+	_, err = GetSession(db, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error from GetSession on missing-schema DB, got nil")
+	}
+	t.Logf("GetSession on missing-schema DB returned (expected) error: %v", err)
 }
