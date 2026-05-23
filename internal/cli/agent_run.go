@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/jeevan/agentrun/internal/agent"
 	"github.com/jeevan/agentrun/internal/config"
 	"github.com/jeevan/agentrun/internal/db"
 	"github.com/jeevan/agentrun/internal/gitmeta"
+	"github.com/jeevan/agentrun/internal/hooks"
 	"github.com/jeevan/agentrun/internal/pty"
 	"github.com/jeevan/agentrun/internal/recorder"
 )
@@ -52,6 +54,10 @@ func runAgent(agentName string, args []string) error {
 	}
 	defer d.Close()
 
+	// 4b. Resolve our own absolute path so the hooks settings file can name us.
+	//     Failure here is non-fatal: we just skip hooks and fall back to PTY-only recording.
+	agentrunBin := resolveSelfPath()
+
 	// 5. Gather git metadata (best-effort; partial results are fine).
 	cwd, _ := os.Getwd()
 	snap := gitmeta.Capture(cwd)
@@ -70,6 +76,18 @@ func runAgent(agentName string, args []string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("recorder start: %w", err)
+	}
+
+	// 6b. For Claude, generate the per-session hooks.json that Claude will read
+	//     via --settings. For Codex, skip — Codex hook support is a later phase.
+	var hooksSettingsPath string
+	if agentName == "claude" && agentrunBin != "" {
+		p, err := hooks.GenerateSettings(cfg.DBDir, rec.SessionID(), agentrunBin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentrun: warning: failed to write hooks settings (continuing without hooks): %v\n", err)
+		} else {
+			hooksSettingsPath = p
+		}
 	}
 
 	// 7. Open artifact files for the tee writers.
@@ -98,8 +116,21 @@ func runAgent(agentName string, args []string) error {
 	defer stdinChunker.Close()
 
 	// 9. Build the child command.
-	cmd := exec.Command(binPath, args...)
-	cmd.Env = append(os.Environ(), "AGENTRUN_SESSION_ID="+rec.SessionID())
+	childArgs := args
+	if hooksSettingsPath != "" {
+		// Prepend --settings <path> so it takes precedence and isn't accidentally
+		// overridden by something the user passed later. (Claude accepts the flag
+		// anywhere on argv; prepending is just defensive.)
+		// Note: if the user also passes --settings later, Claude's last-one-wins
+		// behavior means their settings would take precedence. This is documented
+		// and acceptable — the user is explicitly opting out of our recording hooks.
+		childArgs = append([]string{"--settings", hooksSettingsPath}, args...)
+	}
+	cmd := exec.Command(binPath, childArgs...)
+	cmd.Env = append(os.Environ(),
+		"AGENTRUN_SESSION_ID="+rec.SessionID(),
+		"AGENTRUN_DB_PATH="+cfg.DBPath,
+	)
 	cmd.Dir = cwd
 
 	// 10. Tee writers: each byte goes to the artifact file AND the chunker.
@@ -151,7 +182,32 @@ func runAgent(agentName string, args []string) error {
 	// 17. Restore terminal before exiting so the user's shell is not left broken.
 	handle.Close()
 
-	// 17. Exit with the child's code so the wrapper is transparent.
+	// 17b. Best-effort cleanup of the per-session hooks settings dir.
+	// Must happen AFTER handle.Close() so that if cleanup hangs, the terminal
+	// is already restored and not left in raw mode.
+	if hooksSettingsPath != "" {
+		if err := hooks.Cleanup(cfg.DBDir, rec.SessionID()); err != nil {
+			fmt.Fprintf(os.Stderr, "agentrun: warning: hooks cleanup: %v\n", err)
+		}
+	}
+
+	// 18. Exit with the child's code so the wrapper is transparent.
 	os.Exit(exitCode)
 	return nil // unreachable
+}
+
+// resolveSelfPath returns the absolute path to the running agentrun binary.
+// Tries os.Executable() first (with EvalSymlinks), falls back to exec.LookPath("agentrun").
+// Returns "" if both fail — caller must treat that as "do not register hooks".
+func resolveSelfPath() string {
+	if p, err := os.Executable(); err == nil && p != "" {
+		if abs, err := filepath.EvalSymlinks(p); err == nil {
+			return abs
+		}
+		return p
+	}
+	if p, err := exec.LookPath("agentrun"); err == nil {
+		return p
+	}
+	return ""
 }
