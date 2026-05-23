@@ -20,6 +20,7 @@ import (
 	"github.com/AI4Everyonee/agentrun/internal/gitmeta"
 	"github.com/AI4Everyonee/agentrun/internal/ids"
 	"github.com/AI4Everyonee/agentrun/internal/tokenparse"
+	"github.com/AI4Everyonee/agentrun/internal/transcript"
 )
 
 // Event is the in-memory representation of an event before insertion.
@@ -260,6 +261,11 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 		//     and persist into sessions.tokens_used / cost_usd_cents.
 		r.captureTokenRollup()
 
+		// 4c. Copy the agent's own JSONL transcript as a gzipped artifact.
+		//     The transcript_path is populated by the SessionStart hook earlier
+		//     in the session, so we re-read it from the DB here.
+		r.captureTranscript()
+
 		// 5. Finalize the session row.
 		status := "completed"
 		if exitCode != 0 {
@@ -271,6 +277,21 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 		}
 	})
 	return r.closeErr
+}
+
+// captureTranscript looks up sessions.transcript_path (which the SessionStart
+// hook populated earlier) and copies the file into our artifacts dir, gzipped.
+// Best-effort: any failure is logged and swallowed so Close still finalizes.
+func (r *Recorder) captureTranscript() {
+	sess, err := db.GetSession(r.db, r.sessionID)
+	if err != nil || !sess.TranscriptPath.Valid {
+		return
+	}
+	// Derive the parent artifactsDir from r.artDir (which is <artifacts>/<sid>).
+	artifactsDir := filepath.Dir(r.artDir)
+	if err := transcript.Capture(r.db, r.sessionID, sess.TranscriptPath.String, artifactsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: capture transcript: %v\n", err)
+	}
 }
 
 // captureTokenRollup scans recorded terminal.output events for token/cost

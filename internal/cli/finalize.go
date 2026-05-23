@@ -3,9 +3,12 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/AI4Everyonee/agentrun/internal/db"
+	"github.com/AI4Everyonee/agentrun/internal/transcript"
 )
 
 // runFinalizeIdle sweeps sessions where status='running' and whose last event
@@ -41,9 +44,17 @@ func runFinalizeIdle(args []string) error {
 
 	fmt.Printf("agentrun: finalized %d idle sessions older than %s\n", len(ids), *olderThan)
 
-	// Schedule summarization for each freshly-finalized session. Detached so
-	// the CLI exits immediately even when summarizing dozens of stale rows.
+	// For each freshly finalized session: copy its transcript artifact (if
+	// the path is still on disk) and schedule an OpenAI summary. Both are
+	// best-effort; errors logged-and-swallowed.
+	artifactsDir := filepath.Join(filepath.Dir(dbPath), "artifacts")
 	for _, sid := range ids {
+		sess, err := db.GetSession(d, sid)
+		if err == nil && sess.TranscriptPath.Valid {
+			if err := transcript.Capture(d, sid, sess.TranscriptPath.String, artifactsDir); err != nil {
+				fmt.Fprintf(os.Stderr, "agentrun: capture transcript %s: %v\n", sid, err)
+			}
+		}
 		scheduleSummary(sid)
 	}
 	return nil

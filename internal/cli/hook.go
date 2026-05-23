@@ -21,6 +21,7 @@ import (
 	"github.com/AI4Everyonee/agentrun/internal/hooks"
 	"github.com/AI4Everyonee/agentrun/internal/ids"
 	"github.com/AI4Everyonee/agentrun/internal/redact"
+	"github.com/AI4Everyonee/agentrun/internal/transcript"
 	"github.com/AI4Everyonee/agentrun/internal/userident"
 	"github.com/AI4Everyonee/agentrun/internal/validation"
 )
@@ -185,6 +186,7 @@ func runHook(args []string) error {
 				fmt.Fprintf(os.Stderr, "agentrun hook: finalize session: %v\n", finalizeErr)
 			}
 			captureNativeGitDiff(d, sessionID, cwd, endSHA)
+			captureNativeTranscript(d, sessionID, probe)
 			scheduleSummary(sessionID)
 		}
 	}
@@ -377,6 +379,36 @@ func captureNativeGitDiff(d *sql.DB, sessionID, cwd, endSHA string) {
 	}
 	if err := db.InsertArtifact(d, row); err != nil {
 		fmt.Fprintf(os.Stderr, "agentrun hook: insert git_diff artifact: %v\n", err)
+	}
+}
+
+// captureNativeTranscript copies the agent's own JSONL transcript into the
+// artifacts dir for native (unwrapped) sessions on SessionEnd. The path is
+// pulled either from the payload (preferred — Claude reliably includes it)
+// or from the sessions row as a fallback. Best-effort.
+func captureNativeTranscript(d *sql.DB, sessionID string, probe map[string]any) {
+	transcriptPath := ""
+	if probe != nil {
+		if v, ok := probe["transcript_path"].(string); ok {
+			transcriptPath = v
+		}
+	}
+	if transcriptPath == "" {
+		// Fallback to the DB if SessionStart populated it earlier in the session.
+		sess, err := db.GetSession(d, sessionID)
+		if err == nil && sess.TranscriptPath.Valid {
+			transcriptPath = sess.TranscriptPath.String
+		}
+	}
+	if transcriptPath == "" {
+		return
+	}
+
+	// Artifacts dir derives from the DB path (parent dir + "artifacts").
+	dbPath, _ := resolveDBPath()
+	artDir := filepath.Join(filepath.Dir(dbPath), "artifacts")
+	if err := transcript.Capture(d, sessionID, transcriptPath, artDir); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: capture transcript: %v\n", err)
 	}
 }
 
