@@ -700,6 +700,77 @@ func FetchSessionEvents(d *sql.DB, sessionID string) ([]EventRow, error) {
 	return result, nil
 }
 
+// SearchHit is one result row from SearchEvents.
+type SearchHit struct {
+	EventID   string
+	SessionID string
+	Agent     string
+	Type      string
+	Ts        time.Time
+	Snippet   string
+}
+
+// SearchEvents runs an FTS5 query against events_fts.
+// sessionFilter and typeFilter may be empty strings to skip those constraints.
+// limit must be > 0.
+//
+// Note: the FTS5 content table maps the FTS 'payload' column to events.payload_json.
+// Because the column names differ, snippet() cannot be used (it would look for a
+// column named 'payload' in the base table). Instead we return events.payload_json
+// as the Snippet field and let the caller trim/highlight it.
+func SearchEvents(d *sql.DB, query, sessionFilter, typeFilter string, limit int) ([]SearchHit, error) {
+	base := `
+SELECT
+    e.id,
+    e.session_id,
+    s.agent,
+    e.type,
+    e.ts,
+    CAST(e.payload_json AS TEXT) AS snip
+FROM events_fts
+JOIN events e ON e.rowid = events_fts.rowid
+JOIN sessions s ON s.id = e.session_id
+WHERE events_fts MATCH ?`
+
+	args := []interface{}{query}
+
+	if sessionFilter != "" {
+		base += ` AND e.session_id = ?`
+		args = append(args, sessionFilter)
+	}
+	if typeFilter != "" {
+		base += ` AND e.type LIKE ?`
+		args = append(args, "%"+typeFilter+"%")
+	}
+
+	base += ` ORDER BY e.ts DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := d.Query(base, args...)
+	if err != nil {
+		return nil, fmt.Errorf("SearchEvents: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []SearchHit
+	for rows.Next() {
+		var h SearchHit
+		var tsStr string
+		if err := rows.Scan(&h.EventID, &h.SessionID, &h.Agent, &h.Type, &tsStr, &h.Snippet); err != nil {
+			return nil, fmt.Errorf("SearchEvents: scan: %w", err)
+		}
+		h.Ts, err = parseTime(tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("SearchEvents: parse ts: %w", err)
+		}
+		result = append(result, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("SearchEvents: rows: %w", err)
+	}
+	return result, nil
+}
+
 // FinalizeIdleSessions marks running sessions as completed if their last event
 // is older than olderThan ago. Returns the number of session rows finalized.
 // Both UPDATEs happen in one transaction.
@@ -768,4 +839,207 @@ UPDATE session_summary SET status = 'completed'
 		return 0, fmt.Errorf("FinalizeIdleSessions: commit: %w", err)
 	}
 	return int(count64), nil
+}
+
+// ─── stats helpers ────────────────────────────────────────────────────────────
+
+// AgentStat holds per-agent usage numbers for `agentrun stats`.
+type AgentStat struct {
+	Agent           string
+	SessionCount    int
+	ToolCalls       int
+	ValidationsFail int
+	BytesEstimate   int64 // rough — sum of artifact size_bytes
+}
+
+// StatsByAgent returns per-agent rollups. All parameters are optional filters:
+//   - repo: filter to a single repo_root (empty = all)
+//   - user: filter to a single user_name (empty = all)
+//   - since: zero value = all time; non-zero = only sessions started after this time
+func StatsByAgent(d *sql.DB, repo, user string, since time.Time) ([]AgentStat, error) {
+	args := []interface{}{}
+	where := "1=1"
+	if repo != "" {
+		where += " AND s.repo_root = ?"
+		args = append(args, repo)
+	}
+	if user != "" {
+		where += " AND s.user_name = ?"
+		args = append(args, user)
+	}
+	if !since.IsZero() {
+		where += " AND s.started_at >= ?"
+		args = append(args, since.UTC().Format("2006-01-02T15:04:05.999999999Z"))
+	}
+
+	q := fmt.Sprintf(`
+SELECT s.agent,
+       COUNT(DISTINCT s.id)                  AS session_count,
+       COALESCE(SUM(ss.tool_calls), 0)       AS tool_calls,
+       COALESCE(SUM(ss.validations_fail), 0) AS validations_fail,
+       COALESCE((
+           SELECT SUM(a.size_bytes)
+           FROM artifacts a
+           JOIN sessions s2 ON a.session_id = s2.id
+           WHERE s2.agent = s.agent
+           AND %s
+       ), 0)                                 AS bytes_estimate
+FROM sessions s
+LEFT JOIN session_summary ss ON ss.session_id = s.id
+WHERE %s
+GROUP BY s.agent
+ORDER BY session_count DESC`, where, where)
+
+	// We use the same where/args twice — duplicate them.
+	doubledArgs := append(append([]interface{}{}, args...), args...)
+
+	rows, err := d.Query(q, doubledArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("StatsByAgent: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []AgentStat
+	for rows.Next() {
+		var a AgentStat
+		if err := rows.Scan(&a.Agent, &a.SessionCount, &a.ToolCalls, &a.ValidationsFail, &a.BytesEstimate); err != nil {
+			return nil, fmt.Errorf("StatsByAgent: scan: %w", err)
+		}
+		result = append(result, a)
+	}
+	return result, rows.Err()
+}
+
+// RepoStat holds per-repo usage numbers for `agentrun stats`.
+type RepoStat struct {
+	RepoRoot     string
+	SessionCount int
+	ToolCalls    int
+}
+
+// StatsByRepo returns per-repo rollups, ordered by session count descending.
+func StatsByRepo(d *sql.DB, agent, user string, since time.Time, limit int) ([]RepoStat, error) {
+	args := []interface{}{}
+	where := "1=1"
+	if agent != "" {
+		where += " AND s.agent = ?"
+		args = append(args, agent)
+	}
+	if user != "" {
+		where += " AND s.user_name = ?"
+		args = append(args, user)
+	}
+	if !since.IsZero() {
+		where += " AND s.started_at >= ?"
+		args = append(args, since.UTC().Format("2006-01-02T15:04:05.999999999Z"))
+	}
+	args = append(args, limit)
+
+	q := fmt.Sprintf(`
+SELECT COALESCE(s.repo_root, '(no repo)')  AS repo_root,
+       COUNT(DISTINCT s.id)                AS session_count,
+       COALESCE(SUM(ss.tool_calls), 0)     AS tool_calls
+FROM sessions s
+LEFT JOIN session_summary ss ON ss.session_id = s.id
+WHERE %s
+GROUP BY COALESCE(s.repo_root, '(no repo)')
+ORDER BY session_count DESC
+LIMIT ?`, where)
+
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("StatsByRepo: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RepoStat
+	for rows.Next() {
+		var r RepoStat
+		if err := rows.Scan(&r.RepoRoot, &r.SessionCount, &r.ToolCalls); err != nil {
+			return nil, fmt.Errorf("StatsByRepo: scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// UserStat holds per-user session counts for `agentrun stats`.
+type UserStat struct {
+	UserName     string
+	SessionCount int
+}
+
+// StatsByUser returns per-user rollups, ordered by session count descending.
+func StatsByUser(d *sql.DB, limit int) ([]UserStat, error) {
+	const q = `
+SELECT COALESCE(user_name, '(unknown)') AS user_name,
+       COUNT(*)                          AS session_count
+FROM sessions
+GROUP BY COALESCE(user_name, '(unknown)')
+ORDER BY session_count DESC
+LIMIT ?`
+
+	rows, err := d.Query(q, limit)
+	if err != nil {
+		return nil, fmt.Errorf("StatsByUser: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []UserStat
+	for rows.Next() {
+		var u UserStat
+		if err := rows.Scan(&u.UserName, &u.SessionCount); err != nil {
+			return nil, fmt.Errorf("StatsByUser: scan: %w", err)
+		}
+		result = append(result, u)
+	}
+	return result, rows.Err()
+}
+
+// ValidationFailure describes a session where validations failed, used in stats.
+type ValidationFailure struct {
+	SessionID string
+	Command   string
+	FailedAt  time.Time
+}
+
+// RecentValidationFailures returns sessions with validations_fail > 0, limited
+// to those started after since (zero = all time), ordered by most-recent first.
+func RecentValidationFailures(d *sql.DB, since time.Time, limit int) ([]ValidationFailure, error) {
+	args := []interface{}{}
+	where := "ss.validations_fail > 0"
+	if !since.IsZero() {
+		where += " AND s.started_at >= ?"
+		args = append(args, since.UTC().Format("2006-01-02T15:04:05.999999999Z"))
+	}
+	args = append(args, limit)
+
+	q := fmt.Sprintf(`
+SELECT s.id, COALESCE(s.cwd, ''), s.started_at
+FROM sessions s
+JOIN session_summary ss ON ss.session_id = s.id
+WHERE %s
+ORDER BY s.started_at DESC
+LIMIT ?`, where)
+
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("RecentValidationFailures: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ValidationFailure
+	for rows.Next() {
+		var vf ValidationFailure
+		var tsStr string
+		if err := rows.Scan(&vf.SessionID, &vf.Command, &tsStr); err != nil {
+			return nil, fmt.Errorf("RecentValidationFailures: scan: %w", err)
+		}
+		vf.FailedAt, err = parseTime(tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("RecentValidationFailures: parse ts: %w", err)
+		}
+		result = append(result, vf)
+	}
+	return result, rows.Err()
 }

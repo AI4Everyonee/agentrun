@@ -24,7 +24,11 @@ func TestNormalize(t *testing.T) {
 		{"Stop", "hook", "response.stopped", "", true},
 		{"PreCompact", "hook", "context.pre_compact", "", true},
 		{"SessionEnd", "hook", "hook.session_end", "", true},
-		{"SubagentStart", "hook", "hook.SubagentStart", "", false},
+		{"SubagentStart", "hook", "subagent.started", "tool_calls", true},
+		{"SubagentStop", "hook", "subagent.stopped", "", true},
+		{"TaskCreated", "hook", "task.created", "", true},
+		{"TaskCompleted", "hook", "task.completed", "", true},
+		{"UnknownEvent42", "hook", "hook.UnknownEvent42", "", false},
 		{"", "hook", "hook.", "", false},
 	}
 
@@ -61,11 +65,15 @@ func TestMVPEvents(t *testing.T) {
 		"Stop",
 		"PreCompact",
 		"SessionEnd",
+		"SubagentStart",
+		"SubagentStop",
+		"TaskCreated",
+		"TaskCompleted",
 	}
 
 	got := MVPEvents()
-	if len(got) != 11 {
-		t.Fatalf("MVPEvents() returned %d entries, want 11", len(got))
+	if len(got) != len(want) {
+		t.Fatalf("MVPEvents() returned %d entries, want %d", len(got), len(want))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("MVPEvents() = %v, want %v", got, want)

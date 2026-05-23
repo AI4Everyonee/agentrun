@@ -48,8 +48,8 @@ func TestGenerateSettings_Roundtrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if len(out.Hooks) != 11 {
-		t.Errorf("len(Hooks) = %d, want 11", len(out.Hooks))
+	if len(out.Hooks) != len(MVPEvents()) {
+		t.Errorf("len(Hooks) = %d, want %d", len(out.Hooks), len(MVPEvents()))
 	}
 
 	// Verify every MVP event is present with correct structure.

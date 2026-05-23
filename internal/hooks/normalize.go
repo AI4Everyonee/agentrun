@@ -26,6 +26,13 @@ var mvpTable = []struct {
 	{"Stop", "response.stopped", ""},
 	{"PreCompact", "context.pre_compact", ""},
 	{"SessionEnd", "hook.session_end", ""},
+	// Subagent + Task lifecycle (Claude's Task tool spawns subagents).
+	// SubagentStart/Stop arrive with their own session_id but the Stop also
+	// carries the parent session, so we treat them as nested tool calls.
+	{"SubagentStart", "subagent.started", "tool_calls"},
+	{"SubagentStop", "subagent.stopped", ""},
+	{"TaskCreated", "task.created", ""},
+	{"TaskCompleted", "task.completed", ""},
 }
 
 // Normalize converts a Claude hook event name (e.g. "PreToolUse") into our
