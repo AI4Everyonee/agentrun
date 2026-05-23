@@ -3,8 +3,11 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
+
+	"github.com/jeevan/agentrun/internal/ids"
 )
 
 // SessionRow maps to the sessions table.
@@ -306,6 +309,207 @@ func InsertEventOne(db *sql.DB, e EventRow) error {
 		return fmt.Errorf("InsertEventOne: commit: %w", err)
 	}
 	return nil
+}
+
+// insertRetryBackoffs is the jittered backoff schedule for SQLITE_BUSY and
+// UNIQUE-collision retries. After all retries are exhausted the caller is
+// expected to log and continue — never crash the parent agent.
+var insertRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	50 * time.Millisecond,
+	200 * time.Millisecond,
+}
+
+// isRetryableInsertErr reports whether err is one of the recoverable
+// concurrency errors we expect under load.
+func isRetryableInsertErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "constraint failed: events.session_id, events.sequence")
+}
+
+// sleepJittered sleeps base ±25%. base must be positive.
+func sleepJittered(base time.Duration) {
+	half := int64(base) / 2
+	if half <= 0 {
+		time.Sleep(base)
+		return
+	}
+	delta := time.Duration(rand.Int63n(half))
+	sign := time.Duration(1)
+	if rand.Intn(2) == 0 {
+		sign = -1
+	}
+	d := base + sign*(delta-base/4)
+	if d < 0 {
+		d = base
+	}
+	time.Sleep(d)
+}
+
+// execWithRetry runs Exec with the standard retry envelope.
+func execWithRetry(d *sql.DB, q string, args ...interface{}) error {
+	var lastErr error
+	for attempt := 0; attempt <= len(insertRetryBackoffs); attempt++ {
+		_, err := d.Exec(q, args...)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryableInsertErr(err) {
+			return err
+		}
+		if attempt == len(insertRetryBackoffs) {
+			break
+		}
+		sleepJittered(insertRetryBackoffs[attempt])
+	}
+	return fmt.Errorf("execWithRetry: exhausted retries: %w", lastErr)
+}
+
+// InsertEventWithAutoSeq inserts one events row computing sequence as
+// MAX(sequence)+1 inside a transaction. Designed for cross-process callers
+// (hook subprocesses) that cannot share an in-memory atomic counter.
+//
+// On SQLITE_BUSY or UNIQUE collisions with concurrent writers, retries up to
+// 3 times with jittered backoff (10/50/200ms). Returns the generated event ID
+// on success.
+//
+// All errors after exhausted retries are returned to the caller; the caller
+// is expected to log and continue (never block the parent agent).
+func InsertEventWithAutoSeq(
+	d *sql.DB,
+	sessionID string,
+	ts time.Time,
+	source, eventType string,
+	payload []byte,
+	redactorVersion string,
+) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(insertRetryBackoffs); attempt++ {
+		evtID, err := tryInsertEventWithAutoSeq(d, sessionID, ts, source, eventType, payload, redactorVersion)
+		if err == nil {
+			return evtID, nil
+		}
+		lastErr = err
+		if !isRetryableInsertErr(err) {
+			return "", err
+		}
+		if attempt == len(insertRetryBackoffs) {
+			break
+		}
+		sleepJittered(insertRetryBackoffs[attempt])
+	}
+	return "", fmt.Errorf("InsertEventWithAutoSeq: exhausted retries: %w", lastErr)
+}
+
+func tryInsertEventWithAutoSeq(
+	d *sql.DB,
+	sessionID string,
+	ts time.Time,
+	source, eventType string,
+	payload []byte,
+	redactorVersion string,
+) (string, error) {
+	// d.Begin() issues "BEGIN IMMEDIATE" when the connection was opened with
+	// _txlock=immediate (OpenReadWrite does this). BEGIN IMMEDIATE acquires the
+	// write lock upfront, preventing SQLITE_BUSY_SNAPSHOT (error 517) that would
+	// occur if a deferred transaction upgraded from read to write after seeing a
+	// stale snapshot. busy_timeout handles SQLITE_BUSY but NOT SQLITE_BUSY_SNAPSHOT.
+	tx, err := d.Begin()
+	if err != nil {
+		return "", fmt.Errorf("tryInsertEventWithAutoSeq: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var nextSeq int64
+	row := tx.QueryRow(
+		`SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE session_id = ?`,
+		sessionID,
+	)
+	if err := row.Scan(&nextSeq); err != nil {
+		return "", fmt.Errorf("tryInsertEventWithAutoSeq: scan max(seq): %w", err)
+	}
+
+	evtID := ids.Event()
+	_, err = tx.Exec(
+		`INSERT INTO events (id, session_id, sequence, ts, source, type, payload_json, redaction_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		evtID, sessionID, nextSeq,
+		ts.UTC().Format(time.RFC3339Nano),
+		source, eventType, payload,
+		sql.NullString{String: redactorVersion, Valid: redactorVersion != ""},
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("tryInsertEventWithAutoSeq: commit: %w", err)
+	}
+	committed = true
+	return evtID, nil
+}
+
+// allowedSummaryCounters lists session_summary columns safe to increment.
+// We hard-code this allowlist to prevent SQL injection via interpolated
+// column names.
+var allowedSummaryCounters = map[string]bool{
+	"user_prompts":      true,
+	"tool_calls":        true,
+	"errors":            true,
+	"approvals_request": true,
+	"approvals_denied":  true,
+	"files_changed":     true, // reserved for Phase 4
+	"commands_run":      true, // reserved for Phase 5
+	"validations_run":   true, // reserved for Phase 5
+	"validations_pass":  true, // reserved for Phase 5
+	"validations_fail":  true, // reserved for Phase 5
+}
+
+// IncrementSummaryCounter atomically increments one counter column on the
+// session_summary row for sessionID. Same retry envelope as InsertEventWithAutoSeq.
+func IncrementSummaryCounter(d *sql.DB, sessionID, counter string) error {
+	if !allowedSummaryCounters[counter] {
+		return fmt.Errorf("IncrementSummaryCounter: counter %q not in allowlist", counter)
+	}
+	q := fmt.Sprintf(
+		`UPDATE session_summary SET %s = %s + 1 WHERE session_id = ?`,
+		counter, counter,
+	)
+	return execWithRetry(d, q, sessionID)
+}
+
+// UpdateSessionModel sets sessions.model. Idempotent (overwrites). No-op on
+// empty model. Same retry envelope.
+func UpdateSessionModel(d *sql.DB, sessionID, model string) error {
+	if model == "" {
+		return nil
+	}
+	return execWithRetry(d, `UPDATE sessions SET model = ? WHERE id = ?`, model, sessionID)
+}
+
+// UpdateSessionTranscriptPath sets sessions.transcript_path ONLY IF the
+// current value is NULL (so the first hook to report wins; later hooks
+// silently no-op). Same retry envelope.
+func UpdateSessionTranscriptPath(d *sql.DB, sessionID, path string) error {
+	if path == "" {
+		return nil
+	}
+	return execWithRetry(d,
+		`UPDATE sessions SET transcript_path = ? WHERE id = ? AND transcript_path IS NULL`,
+		path, sessionID,
+	)
 }
 
 // CountEventsByType returns the count of events per type for a given session.
