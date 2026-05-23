@@ -24,6 +24,8 @@ func Run(args []string) error {
 		return runSessions(args[1:])
 	case "show":
 		return runShow(args[1:])
+	case "hook":
+		return runHook(args[1:])
 	case "help", "-h", "--help":
 		return usage()
 	default:
@@ -39,6 +41,7 @@ Usage:
   agentrun codex  [args...]    Run the Codex CLI under recording
   agentrun sessions            List recorded sessions
   agentrun show <session_id>   Show summary for a session
+  agentrun hook <event>        Internal: invoked by Claude hooks (do not call directly)
   agentrun help                Show this help`)
 	return ErrUsage
 }
