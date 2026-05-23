@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd job to sweep stale 'running' sessions every 30 minutes. Useful because
+  Codex never emits SessionEnd; without this, native Codex sessions stay
+  status=running forever in the DB.
+
+  Install:
+    1. Edit the ProgramArguments path below to point at YOUR installed agentrun
+       binary (e.g. /usr/local/bin/agentrun) and YOUR HOME directory.
+    2. cp this file to ~/Library/LaunchAgents/com.agentrun.finalize-idle.plist
+    3. launchctl load -w ~/Library/LaunchAgents/com.agentrun.finalize-idle.plist
+
+  Stop:
+    launchctl unload -w ~/Library/LaunchAgents/com.agentrun.finalize-idle.plist
+
+  Logs go to /tmp/agentrun-finalize-idle.log; tail to debug.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentrun.finalize-idle</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/agentrun</string>
+        <string>finalize-idle</string>
+        <string>--older-than</string>
+        <string>30m</string>
+    </array>
+
+    <!-- Fire every 30 minutes. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- Run once at load + on a fixed cadence. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Use the user's environment so AGENTRUN_USER / HOME etc. resolve. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/REPLACE_ME</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/agentrun-finalize-idle.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentrun-finalize-idle.log</string>
+
+    <!-- Don't restart on exit; we want exactly one run per interval. -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

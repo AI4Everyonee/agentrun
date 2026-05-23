@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeevan/agentrun/internal/collector"
 	"github.com/jeevan/agentrun/internal/db"
 	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/hooks"
@@ -54,6 +55,17 @@ const defaultMaxPayloadBytes = 256 * 1024
 //  2. $AGENTRUN_DB_DIR/agentrun.db
 //  3. $HOME/.agentrun/agentrun.db
 func runHook(args []string) error {
+	// Telemetry-honesty: warn on stderr if a hook took >50ms. Indicates DB
+	// contention or slow disk; helps users notice when recordings are
+	// silently incomplete. Suggest the collector mode that drops latency.
+	start := time.Now()
+	defer func() {
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			fmt.Fprintf(os.Stderr, "agentrun hook: slow (%v) — consider `agentrun collector start`\n",
+				elapsed.Round(time.Millisecond))
+		}
+	}()
+
 	if len(args) != 2 {
 		fmt.Fprintln(os.Stderr, "agentrun hook: usage: agentrun hook <agent> <EventName>")
 		return nil
@@ -101,6 +113,13 @@ func runHook(args []string) error {
 	sessionID, native := resolveSessionID(agentName, probe)
 	if sessionID == "" {
 		fmt.Fprintln(os.Stderr, "agentrun hook: cannot resolve session id (no AGENTRUN_SESSION_ID and no payload session_id); ignoring")
+		return nil
+	}
+
+	// Fast path: try to delegate to a running collector over the Unix socket.
+	// On any error (no socket, timeout, collector error) we fall through to the
+	// direct DB write path below.
+	if err := trySendToCollector(agentName, eventName, sessionID, native, raw); err == nil {
 		return nil
 	}
 
@@ -478,4 +497,19 @@ func ensureNativeSessionRow(d *sql.DB, sessionID, agentName string, payload map[
 		return fmt.Errorf("insert summary: %w", err)
 	}
 	return nil
+}
+
+// trySendToCollector attempts to deliver the hook event to a running collector
+// server via the Unix domain socket. Returns nil if the collector accepted it,
+// otherwise an error so the caller can fall through to the direct DB path.
+func trySendToCollector(agentName, eventName, sessionID string, native bool, raw json.RawMessage) error {
+	socketPath := collector.DefaultSocketPath()
+	req := collector.Request{
+		Agent:     agentName,
+		Event:     eventName,
+		SessionID: sessionID,
+		Payload:   raw,
+		Native:    native,
+	}
+	return collector.TrySend(socketPath, req)
 }

@@ -18,6 +18,8 @@
 package redact
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"regexp"
 )
 
@@ -92,17 +94,32 @@ var defaultRegex = &Regex{
 // with "[REDACTED:<label>]". For patterns that capture surrounding context
 // (the .env-style assignment and Authorization-bearer pattern), we preserve
 // the prefix/suffix groups so the surrounding structure stays intact.
+//
+// PTY events (terminal.output / terminal.stdin) carry their payload as
+// base64-encoded raw bytes inside a {"bytes_b64":"…","len":N} envelope. We
+// decode, redact the underlying bytes, and re-encode so secrets that echo
+// through the terminal are stripped before persistence. Other event types
+// are scanned byte-for-byte without decoding.
 func (r *Regex) Redact(eventType string, payload []byte) ([]byte, string) {
+	if eventType == "terminal.output" || eventType == "terminal.stdin" {
+		if redacted, ok := r.redactTerminalEnvelope(payload); ok {
+			return redacted, r.version
+		}
+		// Fall through to byte-level redaction if the envelope shape isn't
+		// what we expected.
+	}
+	return r.redactBytes(payload), r.version
+}
+
+// redactBytes is the original byte-level scrubber used for hook payloads.
+func (r *Regex) redactBytes(payload []byte) []byte {
 	out := payload
 	for _, p := range r.patterns {
 		out = p.re.ReplaceAllFunc(out, func(match []byte) []byte {
-			// Patterns that include capture groups for surrounding context:
-			// rebuild from submatches so we keep prefix + replace value.
 			if p.re.NumSubexp() >= 2 {
 				groups := p.re.FindSubmatchIndex(match)
 				if len(groups) >= 6 {
 					prefix := match[groups[2]:groups[3]]
-					// Last group (if present) is the closing quote; preserve it.
 					suffix := []byte{}
 					if len(groups) >= 8 && groups[6] >= 0 {
 						suffix = match[groups[6]:groups[7]]
@@ -114,5 +131,33 @@ func (r *Regex) Redact(eventType string, payload []byte) ([]byte, string) {
 			return []byte("[REDACTED:" + p.label + "]")
 		})
 	}
-	return out, r.version
+	return out
+}
+
+// redactTerminalEnvelope handles {"bytes_b64":"…","len":N} payloads emitted by
+// the chunker. Returns (redacted, true) on success or (nil, false) if the
+// payload doesn't match the expected shape — caller should fall back.
+func (r *Regex) redactTerminalEnvelope(payload []byte) ([]byte, bool) {
+	var envelope struct {
+		BytesB64 string `json:"bytes_b64"`
+		Len      int    `json:"len"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, false
+	}
+	if envelope.BytesB64 == "" {
+		return payload, true
+	}
+	raw, err := base64.StdEncoding.DecodeString(envelope.BytesB64)
+	if err != nil {
+		return nil, false
+	}
+	redactedRaw := r.redactBytes(raw)
+	envelope.BytesB64 = base64.StdEncoding.EncodeToString(redactedRaw)
+	envelope.Len = len(redactedRaw)
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }

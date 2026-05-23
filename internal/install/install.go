@@ -64,8 +64,18 @@ const (
 // Install adds agentrun's hooks to ~/.claude/settings.json and ~/.codex/config.toml.
 // Existing user hooks are preserved. Re-running Install is safe — prior agentrun
 // entries are removed before the fresh ones are added.
+//
+// Acquires an exclusive flock on a lock file in the home dir for the duration
+// of the work so two `agentrun install` invocations can't race on the same
+// settings file.
 func Install(agentrunBin string) (Result, error) {
 	var res Result
+
+	unlock, err := acquireInstallLock()
+	if err != nil {
+		return res, err
+	}
+	defer unlock()
 
 	claudeRes, err := installClaude(agentrunBin)
 	if err != nil {
@@ -84,8 +94,16 @@ func Install(agentrunBin string) (Result, error) {
 
 // Uninstall removes agentrun's hooks from ~/.claude/settings.json and
 // ~/.codex/config.toml. User-authored hooks are left in place.
+//
+// Holds the same exclusive flock as Install.
 func Uninstall() (Result, error) {
 	var res Result
+
+	unlock, err := acquireInstallLock()
+	if err != nil {
+		return res, err
+	}
+	defer unlock()
 
 	claudeRes, err := uninstallClaude()
 	if err != nil {

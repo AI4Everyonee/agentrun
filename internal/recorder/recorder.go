@@ -12,9 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"compress/gzip"
+	"encoding/base64"
+	"encoding/json"
+
 	"github.com/jeevan/agentrun/internal/db"
 	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/ids"
+	"github.com/jeevan/agentrun/internal/tokenparse"
 )
 
 // Event is the in-memory representation of an event before insertion.
@@ -251,6 +256,10 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 			r.captureGitDiff(endCommitSHA)
 		}
 
+		// 4b. Scrape any "tokens used: N" / cost lines from the terminal stream
+		//     and persist into sessions.tokens_used / cost_usd_cents.
+		r.captureTokenRollup()
+
 		// 5. Finalize the session row.
 		status := "completed"
 		if exitCode != 0 {
@@ -264,9 +273,72 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 	return r.closeErr
 }
 
+// captureTokenRollup scans recorded terminal.output events for token/cost
+// patterns and writes the LAST values into the session row. Wrapper-only —
+// native sessions don't capture PTY bytes, so there's nothing to scan.
+//
+// Done at session close (not streamed) so the final cumulative number wins.
+// Best-effort: any failure is logged to stderr and ignored.
+func (r *Recorder) captureTokenRollup() {
+	if r.ptyPath == "" {
+		return
+	}
+	// Read events of type terminal.output directly from the DB so the chunked
+	// stream's exact byte sequence is reconstructable.
+	rows, err := r.db.Query(
+		`SELECT payload_json FROM events WHERE session_id = ? AND type = 'terminal.output' ORDER BY sequence ASC`,
+		r.sessionID,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: token rollup query: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var combined []byte
+	for rows.Next() {
+		var p []byte
+		if err := rows.Scan(&p); err != nil {
+			continue
+		}
+		var envelope struct {
+			BytesB64 string `json:"bytes_b64"`
+		}
+		if err := json.Unmarshal(p, &envelope); err != nil {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(envelope.BytesB64)
+		if err != nil {
+			continue
+		}
+		combined = append(combined, raw...)
+	}
+
+	if len(combined) == 0 {
+		return
+	}
+	text := tokenparse.StripANSI(string(combined))
+	result, ok := tokenparse.Extract(text)
+	if !ok {
+		return
+	}
+	tokens := int64(-1)
+	if result.Tokens > 0 {
+		tokens = int64(result.Tokens)
+	}
+	cost := int64(-1)
+	if result.CostCents > 0 {
+		cost = int64(result.CostCents)
+	}
+	if err := db.UpdateSessionTokensAndCost(r.db, r.sessionID, tokens, cost); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: update tokens/cost: %v\n", err)
+	}
+}
+
 // captureGitDiff runs git diff between startCommitSHA and endCommitSHA, writes
-// the patch to <artDir>/git.diff, and inserts an artifacts row. Best-effort:
-// any error is logged and ignored; finalization continues regardless.
+// the patch (gzip-compressed) to <artDir>/git.diff.gz, and inserts an
+// artifacts row. Best-effort: any error is logged and ignored; finalization
+// continues regardless.
 //
 // endCommitSHA may be empty (no end SHA captured) — in that case diff vs.
 // working tree is taken via gitmeta.Diff's startRef-only path.
@@ -275,8 +347,8 @@ func (r *Recorder) captureGitDiff(endCommitSHA string) {
 	if diff == "" {
 		return
 	}
-	path := filepath.Join(r.artDir, "git.diff")
-	if err := os.WriteFile(path, []byte(diff), 0o644); err != nil {
+	path := filepath.Join(r.artDir, "git.diff.gz")
+	if err := writeGzip(path, []byte(diff)); err != nil {
 		fmt.Fprintf(os.Stderr, "agentrun: write git diff: %v\n", err)
 		return
 	}
@@ -286,7 +358,7 @@ func (r *Recorder) captureGitDiff(endCommitSHA string) {
 		return
 	}
 	stat := gitmeta.DiffStat(r.cwd, r.startCommitSHA, endCommitSHA)
-	metaJSON := fmt.Sprintf(`{"stat":%q}`, stat)
+	metaJSON := fmt.Sprintf(`{"stat":%q,"compressed":"gzip","uncompressed_size":%d}`, stat, len(diff))
 	row := db.ArtifactRow{
 		ID:           ids.Artifact(),
 		SessionID:    r.sessionID,
@@ -295,12 +367,29 @@ func (r *Recorder) captureGitDiff(endCommitSHA string) {
 		Path:         sql.NullString{String: path, Valid: true},
 		ContentHash:  sql.NullString{String: hash, Valid: true},
 		SizeBytes:    sql.NullInt64{Int64: size, Valid: true},
-		Mime:         sql.NullString{String: "text/x-diff", Valid: true},
+		Mime:         sql.NullString{String: "application/gzip", Valid: true},
 		MetadataJSON: metaJSON,
 	}
 	if err := db.InsertArtifact(r.db, row); err != nil {
 		fmt.Fprintf(os.Stderr, "agentrun: insert git_diff artifact: %v\n", err)
 	}
+}
+
+// writeGzip writes data to path with gzip compression at the default level
+// (~6, balanced). Used for artifacts large enough that compression pays for
+// itself (~10:1 on text diffs and ANSI-heavy PTY logs).
+func writeGzip(path string, data []byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	if _, err := gz.Write(data); err != nil {
+		gz.Close()
+		return err
+	}
+	return gz.Close()
 }
 
 // batchSize is the max number of events to accumulate before flushing.

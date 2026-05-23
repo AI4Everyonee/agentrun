@@ -11,10 +11,32 @@ claude
 codex exec "..."
 
 # Inspect
-agentrun sessions
-agentrun show <session_id>
+agentrun sessions                                  # list (with USER column on shared DBs)
+agentrun show <session_id>                         # single-session detail
 agentrun export <session_id> --output session.jsonl
+agentrun search "rate limit"                       # FTS5 across all event payloads
+agentrun stats                                     # per-agent / per-repo / per-user rollup
+agentrun diff <session_id>                         # pipe captured git.diff through $PAGER
+agentrun replay <session_id>                       # asciinema-style PTY playback (wrapped only)
+agentrun compare s_a s_b                           # side-by-side event timeline
+agentrun watch --filter tool.pre_use               # tail events live
+agentrun tag <session_id> production-deploy        # annotate
+
+# Maintenance
+agentrun doctor                                    # installation health check
+agentrun finalize-idle --older-than 30m            # sweep stale 'running' sessions
+agentrun gc --older-than 30d                       # delete old sessions + artifacts
+
+# Optional: long-lived collector for sessions with hundreds of tool calls
+agentrun collector start                           # ~10ms→~1ms per hook
+agentrun collector status
+agentrun collector stop
 ```
+
+**Multi-user / cloud mode.** Set `AGENTRUN_USER=alice@example.com` in your
+shell rc; every session row gets stamped with that identity. Combined with a
+shared DB path (e.g. a Litestream-replicated SQLite or a network-mounted file),
+this gives you a team-wide audit trail.
 
 ---
 
