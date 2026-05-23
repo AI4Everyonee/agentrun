@@ -43,8 +43,8 @@ Usage:
 	return ErrUsage
 }
 
-// Subcommand handlers — populated in task #8.
-func runClaude(args []string) error   { return errors.New("not yet implemented") }
-func runCodex(args []string) error    { return errors.New("not yet implemented") }
-func runSessions(args []string) error { return errors.New("not yet implemented") }
-func runShow(args []string) error     { return errors.New("not yet implemented") }
+// Subcommand handlers are implemented in their respective files:
+//   claude.go    — runClaude
+//   codex.go     — runCodex
+//   sessions.go  — runSessions
+//   show.go      — runShow
