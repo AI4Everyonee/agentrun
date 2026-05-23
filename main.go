@@ -15,8 +15,9 @@
 //	agentrun sync [--since 14d]     One-shot backfill; exits when caught up
 //	agentrun list                   Print recent sessions
 //	agentrun show <session_uuid>    Print every event in one session
+//	agentrun status                 Print health of DB, container, watcher
 //
-// Env:
+// Env (also read from ~/.config/agentrun/config.env):
 //
 //	DATABASE_URL   Postgres DSN (required)
 //	AGENTRUN_USER  Identity stamped on every session (defaults to $USER)
@@ -33,6 +34,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -159,6 +161,7 @@ func main() {
 }
 
 func run(args []string) error {
+	loadConfigFile()
 	if len(args) == 0 {
 		return printUsage()
 	}
@@ -171,6 +174,8 @@ func run(args []string) error {
 		return cmdList(args[1:])
 	case "show":
 		return cmdShow(args[1:])
+	case "status":
+		return cmdStatus(args[1:])
 	case "help", "-h", "--help":
 		return printUsage()
 	default:
@@ -186,12 +191,59 @@ Usage:
   agentrun sync [--since 14d]    One-shot catch-up; exits when caught up
   agentrun list                  Show recent sessions
   agentrun show <session_uuid>   Show events in one session
+  agentrun status                Health of DB, container, and watcher process
 
-Env:
+Config (also read from ~/.config/agentrun/config.env):
   DATABASE_URL    Postgres DSN (required)
                   example: postgres://agentrun:agentrun@localhost:5433/agentrun
   AGENTRUN_USER   Identity stamped on every session (defaults to $USER)`)
 	return errUsage
+}
+
+// loadConfigFile reads ~/.config/agentrun/config.env (or
+// $XDG_CONFIG_HOME/agentrun/config.env) and sets any KEY=VALUE pair into the
+// process env, unless that key is already set. Missing file is not an error —
+// users may rely on env vars or a launchd/systemd EnvironmentVariables block.
+// Supported line forms: `KEY=value`, `export KEY=value`, `KEY="quoted value"`,
+// and `# comments`. Anything else is silently skipped.
+func loadConfigFile() {
+	path := os.Getenv("AGENTRUN_CONFIG")
+	if path == "" {
+		base := os.Getenv("XDG_CONFIG_HOME")
+		if base == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return
+			}
+			base = filepath.Join(home, ".config")
+		}
+		path = filepath.Join(base, "agentrun", "config.env")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:eq])
+		v := strings.TrimSpace(line[eq+1:])
+		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = v[1 : len(v)-1]
+		}
+		if _, isSet := os.LookupEnv(k); !isSet {
+			os.Setenv(k, v)
+		}
+	}
 }
 
 // ─── Subcommands ─────────────────────────────────────────────────────────────
@@ -352,6 +404,122 @@ FROM events WHERE agent = $1 AND session_uuid = $2 ORDER BY seq`, agent, sid)
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", seq, ts.Local().Format("15:04:05.000"), role, detail)
 	}
 	return w.Flush()
+}
+
+func cmdStatus(args []string) error {
+	if len(args) > 0 {
+		return errUsage
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ok := func(b bool) string {
+		if b {
+			return "✓"
+		}
+		return "✗"
+	}
+
+	// --- DB
+	dbOK := false
+	var sessionCount, eventCount int64
+	var lastIngest time.Time
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		fmt.Printf("  %s DATABASE_URL not set\n", ok(false))
+	} else {
+		pool, err := pgxpool.New(ctx, dsn)
+		if err == nil {
+			if pingErr := pool.Ping(ctx); pingErr == nil {
+				dbOK = true
+				_ = pool.QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&sessionCount)
+				_ = pool.QueryRow(ctx, `SELECT count(*) FROM events`).Scan(&eventCount)
+				var t *time.Time
+				_ = pool.QueryRow(ctx, `SELECT max(updated_at) FROM ingest_state`).Scan(&t)
+				if t != nil {
+					lastIngest = *t
+				}
+			}
+			pool.Close()
+		}
+		fmt.Printf("  %s database     %s\n", ok(dbOK), redactDSN(dsn))
+	}
+
+	// --- Postgres container
+	containerStatus := dockerContainerStatus("agentrun-postgres")
+	fmt.Printf("  %s container    agentrun-postgres (%s)\n",
+		ok(strings.HasPrefix(containerStatus, "Up")), containerStatus)
+
+	// --- Watcher process
+	pid := findWatcherPID()
+	fmt.Printf("  %s watcher      %s\n", ok(pid > 0), watcherDesc(pid))
+
+	// --- Stats
+	if dbOK {
+		fmt.Printf("\n  sessions:    %d\n", sessionCount)
+		fmt.Printf("  events:      %d\n", eventCount)
+		if !lastIngest.IsZero() {
+			fmt.Printf("  last ingest: %s (%s ago)\n",
+				lastIngest.Local().Format("2006-01-02 15:04:05"),
+				time.Since(lastIngest).Round(time.Second))
+		} else {
+			fmt.Println("  last ingest: never")
+		}
+	}
+
+	if !dbOK || !strings.HasPrefix(containerStatus, "Up") || pid == 0 {
+		return fmt.Errorf("one or more components are unhealthy")
+	}
+	return nil
+}
+
+func redactDSN(dsn string) string {
+	// keep host:port/db visible, hide credentials
+	if i := strings.Index(dsn, "@"); i > 0 {
+		if j := strings.Index(dsn, "://"); j >= 0 && j+3 < i {
+			return dsn[:j+3] + "***" + dsn[i:]
+		}
+	}
+	return dsn
+}
+
+func dockerContainerStatus(name string) string {
+	out, err := exec.Command("docker", "ps", "-a",
+		"--filter", "name=^/"+name+"$",
+		"--format", "{{.Status}}").Output()
+	if err != nil {
+		return "docker unavailable"
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return "not found"
+	}
+	return s
+}
+
+// findWatcherPID returns the PID of an `agentrun watch` process other than
+// this one, or 0 if none is running. Uses pgrep on Unix-like systems.
+func findWatcherPID() int {
+	self := os.Getpid()
+	out, err := exec.Command("pgrep", "-f", "agentrun watch").Output()
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Fields(string(out)) {
+		pid, err := strconv.Atoi(line)
+		if err != nil || pid == self {
+			continue
+		}
+		return pid
+	}
+	return 0
+}
+
+func watcherDesc(pid int) string {
+	if pid == 0 {
+		return "not running"
+	}
+	return fmt.Sprintf("running (pid %d)", pid)
 }
 
 // ─── DB ──────────────────────────────────────────────────────────────────────
