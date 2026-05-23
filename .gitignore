@@ -1,0 +1,9 @@
+# Local recorder DB and artifacts
+.agentrun/
+
+# Build outputs
+/agentrun
+/dist/
+
+# OS junk
+.DS_Store
