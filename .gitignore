@@ -7,3 +7,6 @@
 
 # OS junk
 .DS_Store
+
+# Local agent worktrees
+.claude/
