@@ -10,7 +10,4 @@ import (
 
 var errNotYetImplemented = errors.New("not yet implemented")
 
-func runGC(args []string) error        { return errNotYetImplemented }
-func runWatch(args []string) error     { return errNotYetImplemented }
-func runDoctor(args []string) error    { return errNotYetImplemented }
 func runCollector(args []string) error { return errNotYetImplemented }
