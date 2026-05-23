@@ -67,7 +67,7 @@ func TestGenerateSettings_Roundtrip(t *testing.T) {
 			t.Errorf("Hooks[%q][0].Hooks: got %d entries, want 1", ev, len(groups[0].Hooks))
 			continue
 		}
-		wantCmd := "/usr/local/bin/agentrun hook " + ev
+		wantCmd := "/usr/local/bin/agentrun hook claude " + ev
 		if groups[0].Hooks[0].Command != wantCmd {
 			t.Errorf("Hooks[%q][0].Hooks[0].Command = %q, want %q", ev, groups[0].Hooks[0].Command, wantCmd)
 		}
@@ -121,7 +121,7 @@ func TestGenerateSettings_ShellQuoting(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	wantCmd := "'/path with space/agentrun' hook PreToolUse"
+	wantCmd := "'/path with space/agentrun' hook claude PreToolUse"
 	got := out.Hooks["PreToolUse"][0].Hooks[0].Command
 	if got != wantCmd {
 		t.Errorf("command = %q, want %q", got, wantCmd)
@@ -145,7 +145,7 @@ func TestGenerateSettings_SafePathUnquoted(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	wantCmd := "/usr/local/bin/agentrun hook PreToolUse"
+	wantCmd := "/usr/local/bin/agentrun hook claude PreToolUse"
 	got := out.Hooks["PreToolUse"][0].Hooks[0].Command
 	if got != wantCmd {
 		t.Errorf("command = %q, want %q (should NOT be wrapped in quotes)", got, wantCmd)

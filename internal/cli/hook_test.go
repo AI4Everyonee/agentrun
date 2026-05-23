@@ -120,7 +120,7 @@ func TestRunHook_HappyPath_PreToolUse(t *testing.T) {
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		err = runHook([]string{"claude", "PreToolUse"})
 	})
 
 	if err != nil {
@@ -163,26 +163,26 @@ func TestRunHook_HappyPath_PreToolUse(t *testing.T) {
 	}
 }
 
-// TestRunHook_Orphan_NoSessionID verifies an orphan invocation (no session ID) is
-// ignored safely without inserting any rows.
-func TestRunHook_Orphan_NoSessionID(t *testing.T) {
+// TestRunHook_NoSessionIDAndNoPayload_Ignored verifies that when neither
+// AGENTRUN_SESSION_ID is set nor the payload contains a session_id, the hook
+// exits silently without inserting any rows.
+func TestRunHook_NoSessionIDAndNoPayload_Ignored(t *testing.T) {
 	_, dbPath, d, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	t.Setenv("AGENTRUN_SESSION_ID", "")
 	t.Setenv("AGENTRUN_DB_PATH", dbPath)
 
-	payload := []byte(`{"hook_event_name":"PreToolUse"}`)
+	payload := []byte(`{"hook_event_name":"PreToolUse"}`) // no session_id field
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		err = runHook([]string{"claude", "PreToolUse"})
 	})
 
 	if err != nil {
 		t.Fatalf("runHook returned error: %v", err)
 	}
 
-	// No rows should be inserted (we query the global events count).
 	var n int
 	if qErr := d.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n); qErr != nil {
 		t.Fatalf("count: %v", qErr)
@@ -192,20 +192,129 @@ func TestRunHook_Orphan_NoSessionID(t *testing.T) {
 	}
 }
 
-// TestRunHook_Orphan_NoDBPath verifies an orphan invocation (no DB path) is
-// ignored safely without panicking.
-func TestRunHook_Orphan_NoDBPath(t *testing.T) {
-	t.Setenv("AGENTRUN_SESSION_ID", "s_x")
-	t.Setenv("AGENTRUN_DB_PATH", "")
+// TestRunHook_NativeSession_CreatesRowFromPayload verifies that when
+// AGENTRUN_SESSION_ID is unset but the payload includes a session_id, the
+// hook synthesizes our session ID, creates the sessions+summary rows on
+// the fly, and inserts the event against that new row.
+func TestRunHook_NativeSession_CreatesRowFromPayload(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
 
-	payload := []byte(`{"hook_event_name":"PreToolUse"}`)
-	var err error
+	t.Setenv("AGENTRUN_SESSION_ID", "")
+	t.Setenv("AGENTRUN_DB_PATH", dbPath)
+
+	claudeUUID := "abcd1234-5678-9012-3456-7890abcdef01"
+	payload := []byte(`{"session_id":"` + claudeUUID + `","cwd":"/tmp/native","hook_event_name":"SessionStart","model":"claude-sonnet-4-7","transcript_path":"/tmp/t.jsonl"}`)
+
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		if e := runHook([]string{"claude", "SessionStart"}); e != nil {
+			t.Fatalf("runHook returned error: %v", e)
+		}
 	})
 
+	wantID := "s_native_claude_" + strings.ReplaceAll(claudeUUID, "-", "")
+
+	sess, err := db.GetSession(d, wantID)
 	if err != nil {
-		t.Fatalf("runHook returned error: %v", err)
+		t.Fatalf("GetSession(%s): %v", wantID, err)
+	}
+	if sess.Agent != "claude" {
+		t.Errorf("Agent = %q, want claude", sess.Agent)
+	}
+	if sess.Cwd != "/tmp/native" {
+		t.Errorf("Cwd = %q, want /tmp/native", sess.Cwd)
+	}
+	if !sess.Model.Valid || sess.Model.String != "claude-sonnet-4-7" {
+		t.Errorf("Model = %v, want claude-sonnet-4-7", sess.Model)
+	}
+	if !sess.TranscriptPath.Valid || sess.TranscriptPath.String != "/tmp/t.jsonl" {
+		t.Errorf("TranscriptPath = %v, want /tmp/t.jsonl", sess.TranscriptPath)
+	}
+
+	if n := countEventsForSession(t, d, wantID); n != 1 {
+		t.Errorf("expected 1 event for native session, got %d", n)
+	}
+}
+
+// TestRunHook_NativeSession_SessionEndFinalizes verifies that for a native
+// session, SessionEnd marks the session row as completed.
+func TestRunHook_NativeSession_SessionEndFinalizes(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	t.Setenv("AGENTRUN_SESSION_ID", "")
+	t.Setenv("AGENTRUN_DB_PATH", dbPath)
+
+	claudeUUID := "11111111-2222-3333-4444-555555555555"
+	startPayload := []byte(`{"session_id":"` + claudeUUID + `","cwd":"/tmp/n","hook_event_name":"SessionStart"}`)
+	endPayload := []byte(`{"session_id":"` + claudeUUID + `","cwd":"/tmp/n","hook_event_name":"SessionEnd"}`)
+
+	withStdin(t, startPayload, func() {
+		if e := runHook([]string{"claude", "SessionStart"}); e != nil {
+			t.Fatalf("SessionStart: %v", e)
+		}
+	})
+	withStdin(t, endPayload, func() {
+		if e := runHook([]string{"claude", "SessionEnd"}); e != nil {
+			t.Fatalf("SessionEnd: %v", e)
+		}
+	})
+
+	wantID := "s_native_claude_" + strings.ReplaceAll(claudeUUID, "-", "")
+	sess, err := db.GetSession(d, wantID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !sess.EndedAt.Valid {
+		t.Error("EndedAt should be set after SessionEnd")
+	}
+	if !sess.ExitCode.Valid || sess.ExitCode.Int64 != 0 {
+		t.Errorf("ExitCode = %v, want 0", sess.ExitCode)
+	}
+
+	var status string
+	if qErr := d.QueryRow(`SELECT status FROM session_summary WHERE session_id=?`, wantID).Scan(&status); qErr != nil {
+		t.Fatalf("scan summary status: %v", qErr)
+	}
+	if status != "completed" {
+		t.Errorf("status = %q, want completed", status)
+	}
+}
+
+// TestRunHook_WrapperSession_SessionEndDoesNotFinalize verifies that when the
+// wrapper sets AGENTRUN_SESSION_ID (native=false), SessionEnd inserts the
+// event but does NOT touch the session row — the wrapper's recorder.Close
+// owns finalization in that flow.
+func TestRunHook_WrapperSession_SessionEndDoesNotFinalize(t *testing.T) {
+	sessionID, dbPath, d, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	t.Setenv("AGENTRUN_SESSION_ID", sessionID)
+	t.Setenv("AGENTRUN_DB_PATH", dbPath)
+
+	payload := []byte(`{"session_id":"x","cwd":"/","hook_event_name":"SessionEnd"}`)
+	withStdin(t, payload, func() {
+		if e := runHook([]string{"claude", "SessionEnd"}); e != nil {
+			t.Fatalf("runHook: %v", e)
+		}
+	})
+
+	sess, err := db.GetSession(d, sessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if sess.EndedAt.Valid {
+		t.Error("EndedAt should NOT be set by the hook for wrapper sessions; recorder.Close owns finalization")
 	}
 }
 
@@ -221,7 +330,7 @@ func TestRunHook_BadJSON_WrappedAndStored(t *testing.T) {
 	payload := []byte(`not_valid_json`)
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		err = runHook([]string{"claude", "PreToolUse"})
 	})
 
 	if err != nil {
@@ -257,7 +366,7 @@ func TestRunHook_TruncatesLargePayload(t *testing.T) {
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		err = runHook([]string{"claude", "PreToolUse"})
 	})
 
 	if err != nil {
@@ -298,7 +407,7 @@ func TestRunHook_SessionStart_UpdatesSessionRow(t *testing.T) {
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"SessionStart"})
+		err = runHook([]string{"claude", "SessionStart"})
 	})
 
 	if err != nil {
@@ -330,7 +439,7 @@ func TestRunHook_UnknownEvent_StoredVerbatim(t *testing.T) {
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"SubagentStart"})
+		err = runHook([]string{"claude", "SubagentStart"})
 	})
 
 	if err != nil {
@@ -384,7 +493,7 @@ func TestRunHook_NonExistentDB_NoPanic(t *testing.T) {
 	payload := []byte(`{"hook_event_name":"PreToolUse"}`)
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"PreToolUse"})
+		err = runHook([]string{"claude", "PreToolUse"})
 	})
 
 	if err != nil {
@@ -405,7 +514,7 @@ func TestRunHook_CounterIncrement_Notification(t *testing.T) {
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"Notification"})
+		err = runHook([]string{"claude", "Notification"})
 	})
 
 	if err != nil {

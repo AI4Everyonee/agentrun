@@ -26,6 +26,10 @@ func Run(args []string) error {
 		return runShow(args[1:])
 	case "hook":
 		return runHook(args[1:])
+	case "install":
+		return runInstall(args[1:])
+	case "uninstall":
+		return runUninstall(args[1:])
 	case "help", "-h", "--help":
 		return usage()
 	default:
@@ -37,12 +41,14 @@ func usage() error {
 	fmt.Println(`agentrun — record local agent sessions
 
 Usage:
-  agentrun claude [args...]    Run the Claude Code CLI under recording
-  agentrun codex  [args...]    Run the Codex CLI under recording
-  agentrun sessions            List recorded sessions
-  agentrun show <session_id>   Show summary for a session
-  agentrun hook <event>        Internal: invoked by Claude hooks (do not call directly)
-  agentrun help                Show this help`)
+  agentrun install                Register agentrun hooks globally for claude + codex
+  agentrun uninstall              Remove agentrun hooks from ~/.claude and ~/.codex
+  agentrun claude [args...]       Opt-in: run Claude under recording WITH PTY capture
+  agentrun codex  [args...]       Opt-in: run Codex under recording WITH PTY capture
+  agentrun sessions               List recorded sessions
+  agentrun show <session_id>      Show summary for a session
+  agentrun hook <agent> <event>   Internal: invoked by claude/codex hooks (do not call directly)
+  agentrun help                   Show this help`)
 	return ErrUsage
 }
 

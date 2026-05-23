@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -41,66 +40,10 @@ func TestLoad_EnvRelativePathAbsolutized(t *testing.T) {
 	}
 }
 
-// Test 3: Inside a git repo (no AGENTRUN_DB_DIR), DBDir is <repo_root>/.agentrun.
-func TestLoad_InGitRepo(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-
-	tmp := t.TempDir()
-
-	// Save original cwd; restore after the test.
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(origDir); err != nil {
-			t.Logf("cleanup chdir failed: %v", err)
-		}
-	})
-
-	// Initialize a git repo in tmp.
-	initCmd := exec.Command("git", "init", "-b", "main", tmp)
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("Chdir(%s): %v", tmp, err)
-	}
-
-	t.Setenv("AGENTRUN_DB_DIR", "")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-
-	// Resolve symlinks on both sides to handle macOS /var <-> /private/var.
-	realTmp, err := filepath.EvalSymlinks(tmp)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", tmp, err)
-	}
-	realDBDir, err := filepath.EvalSymlinks(cfg.DBDir)
-	if err != nil {
-		// DBDir may not exist yet — that's fine; resolve the parent.
-		parent := filepath.Dir(cfg.DBDir)
-		realParent, err2 := filepath.EvalSymlinks(parent)
-		if err2 != nil {
-			t.Fatalf("EvalSymlinks(%s): %v", parent, err2)
-		}
-		realDBDir = filepath.Join(realParent, filepath.Base(cfg.DBDir))
-	}
-
-	wantDBDir := filepath.Join(realTmp, ".agentrun")
-	if realDBDir != wantDBDir {
-		t.Errorf("DBDir (resolved) = %q, want %q", realDBDir, wantDBDir)
-	}
-}
-
-// Test 4: Outside any git repo with HOME set, DBDir is <HOME>/.agentrun.
-func TestLoad_NoRepo_HomeSet(t *testing.T) {
+// Test 3: With HOME set and no AGENTRUN_DB_DIR, DBDir is <HOME>/.agentrun
+// regardless of whether cwd is inside a git repo. (Behavior changed when the
+// recorder became a global hook receiver — see config.go for rationale.)
+func TestLoad_HomeSet_IgnoresGitRepo(t *testing.T) {
 	// Use a temp dir that has no .git anywhere in its hierarchy.
 	tmp := t.TempDir()
 
