@@ -857,6 +857,188 @@ func TestOpenReadWrite_Basic(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6 tests — FetchSessionEvents, FinalizeIdleSessions
+// ---------------------------------------------------------------------------
+
+// TestFetchSessionEvents_Order inserts 5 events with out-of-order sequences and
+// verifies FetchSessionEvents returns them sorted by sequence ascending.
+func TestFetchSessionEvents_Order(t *testing.T) {
+	d := newTestDB(t)
+
+	now := time.Now().UTC().Round(time.Microsecond)
+	sess := makeSession("s_fetchorder", now)
+	if err := InsertSession(d, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+
+	// Insert events with deliberately shuffled sequences.
+	seqsToInsert := []int64{5, 1, 3, 2, 4}
+	for _, seq := range seqsToInsert {
+		e := EventRow{
+			ID:          fmt.Sprintf("evt_ord%d", seq),
+			SessionID:   "s_fetchorder",
+			Sequence:    seq,
+			Ts:          now,
+			Source:      "hook",
+			Type:        "tool.pre_use",
+			PayloadJSON: []byte(`{}`),
+		}
+		if err := InsertEventOne(d, e); err != nil {
+			t.Fatalf("InsertEventOne seq=%d: %v", seq, err)
+		}
+	}
+
+	events, err := FetchSessionEvents(d, "s_fetchorder")
+	if err != nil {
+		t.Fatalf("FetchSessionEvents: %v", err)
+	}
+
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events, got %d", len(events))
+	}
+
+	// Must be in ascending sequence order: 1, 2, 3, 4, 5.
+	for i, e := range events {
+		wantSeq := int64(i + 1)
+		if e.Sequence != wantSeq {
+			t.Errorf("events[%d].Sequence = %d, want %d", i, e.Sequence, wantSeq)
+		}
+	}
+}
+
+// TestFinalizeIdleSessions_OnlyAffectsOldSessions sets up two running sessions,
+// one with a recent event and one with an old event, sweeps with olderThan=10m,
+// and asserts only the old one is finalized.
+func TestFinalizeIdleSessions_OnlyAffectsOldSessions(t *testing.T) {
+	d := newTestDB(t)
+
+	now := time.Now().UTC().Round(time.Microsecond)
+
+	// Session A: recent event (1 minute ago) — should NOT be finalized.
+	sessA := makeSession("s_recent", now)
+	sessA.EndedAt = sql.NullTime{}
+	sessA.ExitCode = sql.NullInt64{}
+	sessA.EndCommitSHA = sql.NullString{}
+	if err := InsertSession(d, sessA); err != nil {
+		t.Fatalf("InsertSession sessA: %v", err)
+	}
+	if err := InsertSessionSummary(d, "s_recent", "running"); err != nil {
+		t.Fatalf("InsertSessionSummary sessA: %v", err)
+	}
+	recentEvt := EventRow{
+		ID:          "evt_recent",
+		SessionID:   "s_recent",
+		Sequence:    1,
+		Ts:          now.Add(-1 * time.Minute),
+		Source:      "hook",
+		Type:        "tool.pre_use",
+		PayloadJSON: []byte(`{}`),
+	}
+	if err := InsertEventOne(d, recentEvt); err != nil {
+		t.Fatalf("InsertEventOne recent: %v", err)
+	}
+
+	// Session B: old event (60 minutes ago) — should be finalized.
+	sessB := makeSession("s_old_idle", now)
+	sessB.EndedAt = sql.NullTime{}
+	sessB.ExitCode = sql.NullInt64{}
+	sessB.EndCommitSHA = sql.NullString{}
+	if err := InsertSession(d, sessB); err != nil {
+		t.Fatalf("InsertSession sessB: %v", err)
+	}
+	if err := InsertSessionSummary(d, "s_old_idle", "running"); err != nil {
+		t.Fatalf("InsertSessionSummary sessB: %v", err)
+	}
+	oldEvt := EventRow{
+		ID:          "evt_old",
+		SessionID:   "s_old_idle",
+		Sequence:    1,
+		Ts:          now.Add(-60 * time.Minute),
+		Source:      "hook",
+		Type:        "tool.pre_use",
+		PayloadJSON: []byte(`{}`),
+	}
+	if err := InsertEventOne(d, oldEvt); err != nil {
+		t.Fatalf("InsertEventOne old: %v", err)
+	}
+
+	count, err := FinalizeIdleSessions(d, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("FinalizeIdleSessions: %v", err)
+	}
+
+	if count != 1 {
+		t.Errorf("FinalizeIdleSessions: got count=%d, want 1", count)
+	}
+
+	// s_recent must still be running.
+	var statusRecent string
+	if err := d.QueryRow(`SELECT status FROM session_summary WHERE session_id='s_recent'`).Scan(&statusRecent); err != nil {
+		t.Fatalf("query s_recent status: %v", err)
+	}
+	if statusRecent != "running" {
+		t.Errorf("s_recent status: got %q, want 'running'", statusRecent)
+	}
+
+	// s_old_idle must now be completed.
+	var statusOld string
+	if err := d.QueryRow(`SELECT status FROM session_summary WHERE session_id='s_old_idle'`).Scan(&statusOld); err != nil {
+		t.Fatalf("query s_old_idle status: %v", err)
+	}
+	if statusOld != "completed" {
+		t.Errorf("s_old_idle status: got %q, want 'completed'", statusOld)
+	}
+}
+
+// TestFinalizeIdleSessions_NoChangeWhenAllRecent verifies that when all events
+// are recent, the sweep returns count==0 and no statuses are changed.
+func TestFinalizeIdleSessions_NoChangeWhenAllRecent(t *testing.T) {
+	d := newTestDB(t)
+
+	now := time.Now().UTC().Round(time.Microsecond)
+
+	sess := makeSession("s_fresh", now)
+	sess.EndedAt = sql.NullTime{}
+	sess.ExitCode = sql.NullInt64{}
+	sess.EndCommitSHA = sql.NullString{}
+	if err := InsertSession(d, sess); err != nil {
+		t.Fatalf("InsertSession: %v", err)
+	}
+	if err := InsertSessionSummary(d, "s_fresh", "running"); err != nil {
+		t.Fatalf("InsertSessionSummary: %v", err)
+	}
+	freshEvt := EventRow{
+		ID:          "evt_fresh",
+		SessionID:   "s_fresh",
+		Sequence:    1,
+		Ts:          now.Add(-1 * time.Minute),
+		Source:      "hook",
+		Type:        "tool.pre_use",
+		PayloadJSON: []byte(`{}`),
+	}
+	if err := InsertEventOne(d, freshEvt); err != nil {
+		t.Fatalf("InsertEventOne fresh: %v", err)
+	}
+
+	count, err := FinalizeIdleSessions(d, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("FinalizeIdleSessions: %v", err)
+	}
+
+	if count != 0 {
+		t.Errorf("FinalizeIdleSessions: got count=%d, want 0", count)
+	}
+
+	var status string
+	if err := d.QueryRow(`SELECT status FROM session_summary WHERE session_id='s_fresh'`).Scan(&status); err != nil {
+		t.Fatalf("query s_fresh status: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("s_fresh status: got %q, want 'running'", status)
+	}
+}
+
 // TestOpenReadWrite_MissingFile verifies that OpenReadWrite on a missing file
 // "fails loudly" — at minimum any subsequent query returns a non-nil error.
 // (modernc.org/sqlite may not error on Open itself for missing files — it's

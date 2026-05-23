@@ -24,6 +24,10 @@ func Run(args []string) error {
 		return runSessions(args[1:])
 	case "show":
 		return runShow(args[1:])
+	case "export":
+		return runExport(args[1:])
+	case "finalize-idle":
+		return runFinalizeIdle(args[1:])
 	case "hook":
 		return runHook(args[1:])
 	case "install":
@@ -47,6 +51,8 @@ Usage:
   agentrun codex  [args...]       Opt-in: run Codex under recording WITH PTY capture
   agentrun sessions               List recorded sessions
   agentrun show <session_id>      Show summary for a session
+  agentrun export <session_id>    Export session as JSONL (1 line per event)
+  agentrun finalize-idle          Sweep stale 'running' sessions (e.g. Codex never-ends)
   agentrun hook <agent> <event>   Internal: invoked by claude/codex hooks (do not call directly)
   agentrun help                   Show this help`)
 	return ErrUsage

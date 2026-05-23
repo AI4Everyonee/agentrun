@@ -2,11 +2,13 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -46,6 +48,11 @@ func runShow(args []string) error {
 	}
 
 	artifacts, err := db.ListArtifacts(d, sessionID)
+	if err != nil {
+		return err
+	}
+
+	events, err := db.FetchSessionEvents(d, sessionID)
 	if err != nil {
 		return err
 	}
@@ -94,6 +101,26 @@ func runShow(args []string) error {
 	}
 	tw.Flush()
 
+	// --- Turns block (only for sessions that have turn_id in payloads) ---
+	turns := buildTurns(events)
+	if len(turns) > 0 {
+		fmt.Println()
+		fmt.Println("Turns:")
+		const maxTurns = 10
+		displayed := turns
+		extra := 0
+		if len(turns) > maxTurns {
+			displayed = turns[:maxTurns]
+			extra = len(turns) - maxTurns
+		}
+		for _, ti := range displayed {
+			fmt.Printf("  %s: %s\n", ti.ID, strings.Join(ti.EventTypes, ", "))
+		}
+		if extra > 0 {
+			fmt.Printf("  ... (%d more)\n", extra)
+		}
+	}
+
 	// --- Artifacts block ---
 	fmt.Println()
 	fmt.Println("Artifacts:")
@@ -118,6 +145,56 @@ func shortSHA(s string) string {
 		return s[:8]
 	}
 	return s
+}
+
+// turnInfo groups event types seen within a single turn_id.
+type turnInfo struct {
+	ID         string
+	EventTypes []string // ordered by first occurrence, deduped
+}
+
+// buildTurns groups events by turn_id extracted from payload JSON.
+// Events without a turn_id are ignored. Returns turns in first-seen order.
+func buildTurns(events []db.EventRow) []turnInfo {
+	var order []string // turn_id first-seen order
+	seen := make(map[string]bool)
+
+	for _, e := range events {
+		var payload map[string]interface{}
+		if err := json.Unmarshal(e.PayloadJSON, &payload); err != nil {
+			continue
+		}
+		turnID, _ := payload["turn_id"].(string)
+		if turnID == "" {
+			continue
+		}
+		if !seen[turnID] {
+			seen[turnID] = true
+			order = append(order, turnID)
+		}
+	}
+
+	result := make([]turnInfo, 0, len(order))
+	for _, tid := range order {
+		// Preserve the event type order as seen in sequence (deduped).
+		var types []string
+		typeSeen := make(map[string]bool)
+		for _, e := range events {
+			var payload map[string]interface{}
+			if err := json.Unmarshal(e.PayloadJSON, &payload); err != nil {
+				continue
+			}
+			if tid2, _ := payload["turn_id"].(string); tid2 != tid {
+				continue
+			}
+			if !typeSeen[e.Type] {
+				typeSeen[e.Type] = true
+				types = append(types, e.Type)
+			}
+		}
+		result = append(result, turnInfo{ID: tid, EventTypes: types})
+	}
+	return result
 }
 
 // humanBytes formats n bytes as a human-readable string (B / KB / MB / GB).
