@@ -8,8 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jeevan/agentrun/internal/db"
@@ -46,7 +46,6 @@ type Recorder struct {
 
 	ch   chan Event
 	done chan struct{} // closed when writer goroutine exits
-	seq  int64        // accessed via atomic.AddInt64
 
 	ptyArtifactID   string
 	stdinArtifactID string
@@ -169,14 +168,16 @@ func (r *Recorder) StdinArtifactPath() string { return r.stdinPath }
 
 // Emit pushes an event onto the channel (non-blocking; drops with a one-line stderr
 // warning if full — the on-disk artifact is the canonical fallback per plan R2).
+// Event.Sequence is left zero here; the writer goroutine assigns sequences from
+// MAX(sequence)+1 inside the batch transaction so PTY events coordinate
+// correctly with hook subprocesses writing to the same DB.
 func (r *Recorder) Emit(source, eventType string, payload []byte) {
 	e := Event{
-		ID:       ids.Event(),
-		Sequence: atomic.AddInt64(&r.seq, 1),
-		Ts:       time.Now().UTC(),
-		Source:   source,
-		Type:     eventType,
-		Payload:  append([]byte(nil), payload...), // defensive copy
+		ID:      ids.Event(),
+		Ts:      time.Now().UTC(),
+		Source:  source,
+		Type:    eventType,
+		Payload: append([]byte(nil), payload...), // defensive copy
 	}
 	select {
 	case r.ch <- e:
@@ -186,20 +187,14 @@ func (r *Recorder) Emit(source, eventType string, payload []byte) {
 }
 
 // EmitSync inserts an event directly, bypassing the channel. Used for session.started/ended.
+// Uses db.InsertEventWithAutoSeq so the cross-process retry envelope handles
+// any collision with concurrent hook subprocesses.
 func (r *Recorder) EmitSync(source, eventType string, payload []byte) error {
-	seq := atomic.AddInt64(&r.seq, 1)
 	redacted, version := r.redactor.Redact(eventType, payload)
-	row := db.EventRow{
-		ID:               ids.Event(),
-		SessionID:        r.sessionID,
-		Sequence:         seq,
-		Ts:               time.Now().UTC(),
-		Source:           source,
-		Type:             eventType,
-		PayloadJSON:      redacted,
-		RedactionVersion: sql.NullString{String: version, Valid: true},
-	}
-	return db.InsertEventOne(r.db, row)
+	_, err := db.InsertEventWithAutoSeq(
+		r.db, r.sessionID, time.Now().UTC(), source, eventType, redacted, version,
+	)
+	return err
 }
 
 // UpdatePID updates sessions.pid after the child is forked.
@@ -300,38 +295,91 @@ func (r *Recorder) run() {
 }
 
 // writeBatch persists a batch of events within a single transaction.
+// Sequences are assigned as MAX(existing) + 1 + offset inside the transaction
+// to coordinate with hook subprocesses writing to the same session. On a
+// concurrency error (SQLITE_BUSY or UNIQUE-sequence collision from a peer
+// writer that landed between our MAX read and our INSERT), retries the
+// whole batch up to 3 times with backoff.
 func (r *Recorder) writeBatch(batch []Event) error {
+	backoffs := []time.Duration{10 * time.Millisecond, 50 * time.Millisecond, 200 * time.Millisecond}
+	var lastErr error
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		err := r.tryWriteBatch(batch)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryableWriteErr(err) {
+			return err
+		}
+		if attempt == len(backoffs) {
+			break
+		}
+		time.Sleep(backoffs[attempt])
+	}
+	return fmt.Errorf("writeBatch: exhausted retries: %w", lastErr)
+}
+
+func (r *Recorder) tryWriteBatch(batch []Event) error {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return fmt.Errorf("writeBatch: begin tx: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var nextSeq int64
+	if err := tx.QueryRow(
+		`SELECT COALESCE(MAX(sequence), 0) FROM events WHERE session_id = ?`,
+		r.sessionID,
+	).Scan(&nextSeq); err != nil {
+		return fmt.Errorf("writeBatch: scan max(seq): %w", err)
+	}
 
 	stmt, err := db.InsertEventStmt(tx)
 	if err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("writeBatch: prepare stmt: %w", err)
 	}
 
 	for _, e := range batch {
+		nextSeq++
 		redacted, version := r.redactor.Redact(e.Type, e.Payload)
 		_, err = stmt.Exec(
-			e.ID, r.sessionID, e.Sequence,
+			e.ID, r.sessionID, nextSeq,
 			e.Ts.UTC().Format(time.RFC3339Nano),
 			e.Source, e.Type, redacted, version,
 		)
 		if err != nil {
 			stmt.Close()
-			_ = tx.Rollback()
 			return fmt.Errorf("writeBatch: exec: %w", err)
 		}
 	}
 
 	stmt.Close()
 	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback()
 		return fmt.Errorf("writeBatch: commit: %w", err)
 	}
+	committed = true
 	return nil
+}
+
+// isRetryableWriteErr reports whether err is one of the recoverable
+// concurrency errors we expect when peer hook processes write events
+// to the same session. Mirrors db.isRetryableInsertErr but duplicated
+// here to avoid exporting from the db package.
+func isRetryableWriteErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "constraint failed: events.session_id, events.sequence")
 }
 
 // fileSizeAndHash opens path, streams it through SHA-256, and returns
