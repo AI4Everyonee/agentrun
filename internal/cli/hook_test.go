@@ -291,6 +291,97 @@ func TestRunHook_NativeSession_SessionEndFinalizes(t *testing.T) {
 	}
 }
 
+// TestRunHook_NativeSession_StopUpdatesEndedAt verifies that Stop on a native
+// session bumps ended_at (last activity) but does NOT flip status to completed —
+// long Claude conversations fire Stop after every turn, so finalising on Stop
+// would be premature.
+func TestRunHook_NativeSession_StopUpdatesEndedAt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	t.Setenv("AGENTRUN_SESSION_ID", "")
+	t.Setenv("AGENTRUN_DB_PATH", dbPath)
+
+	claudeUUID := "deadbeef-0000-0000-0000-000000000000"
+	startPayload := []byte(`{"session_id":"` + claudeUUID + `","cwd":"/tmp","hook_event_name":"SessionStart"}`)
+	stopPayload := []byte(`{"session_id":"` + claudeUUID + `","cwd":"/tmp","hook_event_name":"Stop"}`)
+
+	withStdin(t, startPayload, func() {
+		if e := runHook([]string{"claude", "SessionStart"}); e != nil {
+			t.Fatalf("SessionStart: %v", e)
+		}
+	})
+	withStdin(t, stopPayload, func() {
+		if e := runHook([]string{"claude", "Stop"}); e != nil {
+			t.Fatalf("Stop: %v", e)
+		}
+	})
+
+	wantID := "s_native_claude_" + strings.ReplaceAll(claudeUUID, "-", "")
+	sess, err := db.GetSession(d, wantID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !sess.EndedAt.Valid {
+		t.Error("EndedAt should be set after Stop")
+	}
+
+	var status string
+	if qErr := d.QueryRow(`SELECT status FROM session_summary WHERE session_id=?`, wantID).Scan(&status); qErr != nil {
+		t.Fatalf("scan status: %v", qErr)
+	}
+	if status != "running" {
+		t.Errorf("status after Stop = %q, want running (Stop is per-turn, not session end)", status)
+	}
+}
+
+// TestRunHook_NativeSession_ModelFromAnyEvent verifies that the model field is
+// captured from any payload that includes it (Codex emits it on PreToolUse but
+// not on SessionStart).
+func TestRunHook_NativeSession_ModelFromAnyEvent(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+
+	t.Setenv("AGENTRUN_SESSION_ID", "")
+	t.Setenv("AGENTRUN_DB_PATH", dbPath)
+
+	uuid := "11112222-3333-4444-5555-666677778888"
+	// SessionStart without model (typical Codex)
+	startPayload := []byte(`{"session_id":"` + uuid + `","cwd":"/tmp","hook_event_name":"SessionStart"}`)
+	// PreToolUse with model (Codex includes it here)
+	pretoolPayload := []byte(`{"session_id":"` + uuid + `","cwd":"/tmp","hook_event_name":"PreToolUse","model":"gpt-5.5","tool_name":"Bash","tool_input":{"command":"ls"}}`)
+
+	withStdin(t, startPayload, func() {
+		if e := runHook([]string{"codex", "SessionStart"}); e != nil {
+			t.Fatalf("SessionStart: %v", e)
+		}
+	})
+	withStdin(t, pretoolPayload, func() {
+		if e := runHook([]string{"codex", "PreToolUse"}); e != nil {
+			t.Fatalf("PreToolUse: %v", e)
+		}
+	})
+
+	wantID := "s_native_codex_" + strings.ReplaceAll(uuid, "-", "")
+	sess, err := db.GetSession(d, wantID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !sess.Model.Valid || sess.Model.String != "gpt-5.5" {
+		t.Errorf("Model = %v, want gpt-5.5 (captured from PreToolUse)", sess.Model)
+	}
+}
+
 // TestRunHook_WrapperSession_SessionEndDoesNotFinalize verifies that when the
 // wrapper sets AGENTRUN_SESSION_ID (native=false), SessionEnd inserts the
 // event but does NOT touch the session row — the wrapper's recorder.Close

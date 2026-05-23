@@ -16,6 +16,7 @@ import (
 	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/pty"
 	"github.com/jeevan/agentrun/internal/recorder"
+	"github.com/jeevan/agentrun/internal/redact"
 )
 
 // runAgent is the shared wrapper logic for all agent subcommands.
@@ -67,7 +68,7 @@ func runAgent(agentName string, args []string) error {
 		Branch:         snap.Branch,
 		StartCommitSHA: snap.HeadSHA,
 		ArtifactsDir:   cfg.ArtifactsDir,
-		Redactor:       recorder.NoopRedactor{},
+		Redactor:       redact.Default(),
 	})
 	if err != nil {
 		return fmt.Errorf("recorder start: %w", err)

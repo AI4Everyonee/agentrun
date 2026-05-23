@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,9 @@ import (
 	"github.com/jeevan/agentrun/internal/db"
 	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/hooks"
+	"github.com/jeevan/agentrun/internal/ids"
+	"github.com/jeevan/agentrun/internal/redact"
+	"github.com/jeevan/agentrun/internal/validation"
 )
 
 // defaultMaxPayloadBytes is the cap before truncation. Override via
@@ -119,40 +124,47 @@ func runHook(args []string) error {
 
 	m := hooks.Normalize(eventName)
 
+	redacted, redactionVersion := redact.Default().Redact(m.Type, raw)
 	if _, err := db.InsertEventWithAutoSeq(
-		d, sessionID, time.Now().UTC(), m.Source, m.Type, raw, "noop-1",
+		d, sessionID, time.Now().UTC(), m.Source, m.Type, redacted, redactionVersion,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "agentrun hook: insert failed (event=%s session=%s): %v\n", eventName, sessionID, err)
 		return nil
 	}
 
-	if eventName == "SessionStart" {
-		var info struct {
-			Model          string `json:"model"`
-			TranscriptPath string `json:"transcript_path"`
-		}
-		if probeErr := json.Unmarshal(raw, &info); probeErr == nil {
-			if info.Model != "" {
-				if updateErr := db.UpdateSessionModel(d, sessionID, info.Model); updateErr != nil {
-					fmt.Fprintf(os.Stderr, "agentrun hook: update model: %v\n", updateErr)
-				}
-			}
-			if info.TranscriptPath != "" {
-				if updateErr := db.UpdateSessionTranscriptPath(d, sessionID, info.TranscriptPath); updateErr != nil {
-					fmt.Fprintf(os.Stderr, "agentrun hook: update transcript_path: %v\n", updateErr)
-				}
-			}
-		}
+	// Session enrichment: capture model/transcript_path on EVERY event that has
+	// them (Codex includes model on most events; Claude includes neither on
+	// SessionStart per our verification). UpdateSessionModel is a plain UPDATE
+	// — cheap, idempotent, no harm in calling it repeatedly.
+	enrichSession(d, sessionID, raw)
+
+	// Validation classification: for PostToolUse on Bash, see if the command
+	// matches a known test/build/lint/typecheck pattern. If so, emit a
+	// validation.completed event and increment the session_summary counters.
+	if eventName == "PostToolUse" {
+		recordValidation(d, sessionID, probe)
 	}
 
-	// SessionEnd finalizes the row for native sessions. (For wrapper sessions,
-	// the wrapper's recorder.Close finalizes — we still emit the event but skip
-	// the status update to avoid racing with the wrapper.)
-	if eventName == "SessionEnd" && native {
-		if finalizeErr := db.FinalizeSession(
-			d, sessionID, "", "completed", 0, time.Now().UTC(),
-		); finalizeErr != nil {
-			fmt.Fprintf(os.Stderr, "agentrun hook: finalize session: %v\n", finalizeErr)
+	// Native-session lifecycle:
+	//   Stop          — turn boundary. Update ended_at + end_commit_sha so the
+	//                   session reflects "last activity" while staying status=running
+	//                   (long Claude sessions fire Stop after every turn; we mustn't
+	//                   finalize prematurely).
+	//   SessionEnd    — Claude only. Mark status='completed'. Codex sessions stay
+	//                   status=running forever until `agentrun finalize-idle` runs.
+	if native {
+		switch eventName {
+		case "Stop":
+			markNativeStopActivity(d, sessionID, payloadCwd(probe))
+		case "SessionEnd":
+			cwd := payloadCwd(probe)
+			endSHA := gitmeta.HeadCommit(cwd)
+			if finalizeErr := db.FinalizeSession(
+				d, sessionID, endSHA, "completed", 0, time.Now().UTC(),
+			); finalizeErr != nil {
+				fmt.Fprintf(os.Stderr, "agentrun hook: finalize session: %v\n", finalizeErr)
+			}
+			captureNativeGitDiff(d, sessionID, cwd, endSHA)
 		}
 	}
 
@@ -163,6 +175,203 @@ func runHook(args []string) error {
 	}
 
 	return nil
+}
+
+// enrichSession extracts model + transcript_path from the payload (best-effort)
+// and updates the session row. UpdateSessionModel overwrites; UpdateSessionTranscriptPath
+// is first-write-wins. Errors are logged and ignored — enrichment never blocks the hook.
+func enrichSession(d *sql.DB, sessionID string, raw []byte) {
+	var info struct {
+		Model          string `json:"model"`
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return
+	}
+	if info.Model != "" {
+		if err := db.UpdateSessionModel(d, sessionID, info.Model); err != nil {
+			fmt.Fprintf(os.Stderr, "agentrun hook: update model: %v\n", err)
+		}
+	}
+	if info.TranscriptPath != "" {
+		if err := db.UpdateSessionTranscriptPath(d, sessionID, info.TranscriptPath); err != nil {
+			fmt.Fprintf(os.Stderr, "agentrun hook: update transcript_path: %v\n", err)
+		}
+	}
+}
+
+// markNativeStopActivity bumps the session's ended_at to now (so "last activity"
+// is queryable) and records end_commit_sha if it's still NULL. Status stays
+// 'running' — that's only flipped to 'completed' by SessionEnd or by
+// `agentrun finalize-idle`.
+func markNativeStopActivity(d *sql.DB, sessionID, cwd string) {
+	endSHA := gitmeta.HeadCommit(cwd)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := d.Exec(
+		`UPDATE sessions
+		    SET ended_at = ?,
+		        end_commit_sha = COALESCE(end_commit_sha, NULLIF(?, ''))
+		  WHERE id = ?`,
+		now, endSHA, sessionID,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: mark stop activity: %v\n", err)
+	}
+}
+
+// recordValidation classifies the Bash command in a PostToolUse payload, and
+// if it matches a known test/build/lint/typecheck pattern, emits a
+// `validation.completed` event and bumps the session_summary counters.
+//
+// Pass/fail is best-effort: we look for an exit_code field in `tool_response`
+// (Claude) or `tool_result` (Codex). Absence is treated as pass — if the agent
+// returned at all, the command didn't error out at the tool layer.
+func recordValidation(d *sql.DB, sessionID string, probe map[string]any) {
+	if probe == nil {
+		return
+	}
+	toolName, _ := probe["tool_name"].(string)
+	if toolName != "Bash" {
+		return
+	}
+	toolInput, _ := probe["tool_input"].(map[string]any)
+	if toolInput == nil {
+		return
+	}
+	cmd, _ := toolInput["command"].(string)
+	if cmd == "" {
+		return
+	}
+	kind, ok := validation.Classify(cmd)
+	if !ok {
+		return
+	}
+
+	exitCode, hasExit := extractToolExitCode(probe)
+	pass := !hasExit || exitCode == 0
+
+	// Emit validation.completed event.
+	payload := fmt.Sprintf(
+		`{"kind":%q,"command":%q,"pass":%t,"exit_code":%d,"has_exit_code":%t}`,
+		string(kind), cmd, pass, exitCode, hasExit,
+	)
+	if _, err := db.InsertEventWithAutoSeq(
+		d, sessionID, time.Now().UTC(), "validation", "validation.completed",
+		[]byte(payload), "noop-1",
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: insert validation event: %v\n", err)
+	}
+
+	// Bump counters.
+	if err := db.IncrementSummaryCounter(d, sessionID, "validations_run"); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: bump validations_run: %v\n", err)
+	}
+	bumpCol := "validations_pass"
+	if !pass {
+		bumpCol = "validations_fail"
+	}
+	if err := db.IncrementSummaryCounter(d, sessionID, bumpCol); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: bump %s: %v\n", bumpCol, err)
+	}
+}
+
+// extractToolExitCode peeks inside tool_response (Claude) or tool_result (Codex)
+// for an exit_code field. Returns (0, false) if not found.
+func extractToolExitCode(probe map[string]any) (int, bool) {
+	for _, key := range []string{"tool_response", "tool_result"} {
+		raw, ok := probe[key]
+		if !ok {
+			continue
+		}
+		switch v := raw.(type) {
+		case map[string]any:
+			if ec, ok := v["exit_code"]; ok {
+				if f, ok := ec.(float64); ok {
+					return int(f), true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// payloadCwd returns payload["cwd"] as a string, or "" if not present.
+// Used so gitmeta.HeadCommit runs in the session's cwd, not the hook process's.
+func payloadCwd(probe map[string]any) string {
+	if probe == nil {
+		return ""
+	}
+	v, _ := probe["cwd"].(string)
+	return v
+}
+
+// captureNativeGitDiff records the git diff between the session's start commit
+// and the just-computed end commit as an artifact under <DB_DIR>/artifacts/<sid>/.
+// Best-effort — any failure is logged and ignored.
+//
+// For native sessions, we don't have an in-process StartCommitSHA available;
+// look it up from the sessions row instead. If no start commit exists (session
+// wasn't in a git repo at start), we skip.
+func captureNativeGitDiff(d *sql.DB, sessionID, cwd, endSHA string) {
+	sess, err := db.GetSession(d, sessionID)
+	if err != nil {
+		return
+	}
+	if !sess.StartCommitSHA.Valid || sess.StartCommitSHA.String == "" {
+		return
+	}
+	startSHA := sess.StartCommitSHA.String
+
+	diff := gitmeta.Diff(cwd, startSHA, endSHA)
+	if diff == "" {
+		return
+	}
+
+	// Resolve artifacts dir without going through config.Load (avoids redundant
+	// HOME lookups and works even if AGENTRUN_DB_DIR points elsewhere).
+	dbPath, _ := resolveDBPath()
+	artDir := filepath.Join(filepath.Dir(dbPath), "artifacts", sessionID)
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: mkdir artifacts dir: %v\n", err)
+		return
+	}
+	path := filepath.Join(artDir, "git.diff")
+	if err := os.WriteFile(path, []byte(diff), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: write git diff: %v\n", err)
+		return
+	}
+
+	size, hash := fileSizeAndHashHex(path)
+	stat := gitmeta.DiffStat(cwd, startSHA, endSHA)
+	metaJSON := fmt.Sprintf(`{"stat":%q}`, stat)
+	row := db.ArtifactRow{
+		ID:           ids.Artifact(),
+		SessionID:    sessionID,
+		Kind:         "git_diff",
+		Path:         sql.NullString{String: path, Valid: true},
+		ContentHash:  sql.NullString{String: hash, Valid: true},
+		SizeBytes:    sql.NullInt64{Int64: size, Valid: true},
+		Mime:         sql.NullString{String: "text/x-diff", Valid: true},
+		MetadataJSON: metaJSON,
+	}
+	if err := db.InsertArtifact(d, row); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun hook: insert git_diff artifact: %v\n", err)
+	}
+}
+
+// fileSizeAndHashHex returns (size, sha256-hex) of path. Returns (0, "") on any error.
+func fileSizeAndHashHex(path string) (int64, string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return 0, ""
+	}
+	return n, hex.EncodeToString(h.Sum(nil))
 }
 
 // resolveSessionID returns (sessionID, native). When the wrapper has set

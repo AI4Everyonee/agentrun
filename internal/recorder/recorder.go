@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jeevan/agentrun/internal/db"
+	"github.com/jeevan/agentrun/internal/gitmeta"
 	"github.com/jeevan/agentrun/internal/ids"
 )
 
@@ -51,6 +52,11 @@ type Recorder struct {
 	stdinArtifactID string
 	ptyPath         string
 	stdinPath       string
+
+	// Captured at Start so Close can run git diff between start and end SHAs.
+	cwd            string
+	startCommitSHA string
+	artDir         string
 
 	closeOnce sync.Once
 	closeErr  error
@@ -144,6 +150,9 @@ func Start(d *sql.DB, opts StartOpts) (*Recorder, error) {
 		stdinArtifactID: stdinArtID,
 		ptyPath:         ptyPath,
 		stdinPath:       stdinPath,
+		cwd:             opts.Cwd,
+		startCommitSHA:  opts.StartCommitSHA,
+		artDir:          artDir,
 	}
 	go r.run()
 
@@ -235,7 +244,12 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 			}
 		}
 
-		// 4. Finalize the session row.
+		// 4. Capture git diff between start and end SHAs as an artifact (best-effort).
+		if r.startCommitSHA != "" {
+			r.captureGitDiff(endCommitSHA)
+		}
+
+		// 5. Finalize the session row.
 		status := "completed"
 		if exitCode != 0 {
 			status = "failed"
@@ -246,6 +260,45 @@ func (r *Recorder) Close(endCommitSHA string, exitCode int) error {
 		}
 	})
 	return r.closeErr
+}
+
+// captureGitDiff runs git diff between startCommitSHA and endCommitSHA, writes
+// the patch to <artDir>/git.diff, and inserts an artifacts row. Best-effort:
+// any error is logged and ignored; finalization continues regardless.
+//
+// endCommitSHA may be empty (no end SHA captured) — in that case diff vs.
+// working tree is taken via gitmeta.Diff's startRef-only path.
+func (r *Recorder) captureGitDiff(endCommitSHA string) {
+	diff := gitmeta.Diff(r.cwd, r.startCommitSHA, endCommitSHA)
+	if diff == "" {
+		return
+	}
+	path := filepath.Join(r.artDir, "git.diff")
+	if err := os.WriteFile(path, []byte(diff), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: write git diff: %v\n", err)
+		return
+	}
+	size, hash, err := fileSizeAndHash(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: stat git diff: %v\n", err)
+		return
+	}
+	stat := gitmeta.DiffStat(r.cwd, r.startCommitSHA, endCommitSHA)
+	metaJSON := fmt.Sprintf(`{"stat":%q}`, stat)
+	row := db.ArtifactRow{
+		ID:           ids.Artifact(),
+		SessionID:    r.sessionID,
+		EventID:      sql.NullString{},
+		Kind:         "git_diff",
+		Path:         sql.NullString{String: path, Valid: true},
+		ContentHash:  sql.NullString{String: hash, Valid: true},
+		SizeBytes:    sql.NullInt64{Int64: size, Valid: true},
+		Mime:         sql.NullString{String: "text/x-diff", Valid: true},
+		MetadataJSON: metaJSON,
+	}
+	if err := db.InsertArtifact(r.db, row); err != nil {
+		fmt.Fprintf(os.Stderr, "agentrun: insert git_diff artifact: %v\n", err)
+	}
 }
 
 // batchSize is the max number of events to accumulate before flushing.

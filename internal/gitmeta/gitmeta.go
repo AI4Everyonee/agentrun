@@ -37,6 +37,51 @@ func HeadCommit(cwd string) string {
 	return runGit(cwd, "rev-parse", "HEAD")
 }
 
+// Diff returns the patch between two commits (or between a commit and the
+// working tree if endRef is empty). Includes both committed and uncommitted
+// changes when endRef is empty by invoking `git diff <startRef>` (no second
+// rev). Returns "" if startRef is empty, git is unavailable, or the diff
+// command fails. 10-second timeout to accommodate large diffs.
+func Diff(cwd, startRef, endRef string) string {
+	if startRef == "" {
+		return ""
+	}
+	args := []string{"diff", "--no-color", startRef}
+	if endRef != "" && endRef != startRef {
+		args = append(args, endRef)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// DiffStat is the summary form of Diff — `git diff --stat`. Same fallback rules
+// as Diff. Useful for storing alongside the full diff (cheaper to scan).
+func DiffStat(cwd, startRef, endRef string) string {
+	if startRef == "" {
+		return ""
+	}
+	args := []string{"diff", "--stat", "--no-color", startRef}
+	if endRef != "" && endRef != startRef {
+		args = append(args, endRef)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(out), "\n")
+}
+
 // runGit executes git with the given args in cwd with a 1s timeout.
 // Returns the trimmed stdout on success, or "" on any error.
 func runGit(cwd string, args ...string) string {
