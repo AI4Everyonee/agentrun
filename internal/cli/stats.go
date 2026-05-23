@@ -143,33 +143,4 @@ func runStats(args []string) error {
 	return nil
 }
 
-// parseDurationWithDays parses a duration string that optionally uses 'd' for days.
-// Examples: "7d", "24h", "30m", "1h30m", "2d12h"
-func parseDurationWithDays(s string) (time.Duration, error) {
-	// Replace 'd' suffix / occurrences with their equivalent in hours.
-	// Strategy: scan for digit-runs followed by 'd', multiply by 24h.
-	result := time.Duration(0)
-	rest := s
-	for rest != "" {
-		// Try standard time.ParseDuration first.
-		if d, err := time.ParseDuration(rest); err == nil {
-			return result + d, nil
-		}
-		// Find a leading number followed by 'd'.
-		i := 0
-		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
-			i++
-		}
-		if i == 0 || i >= len(rest) || rest[i] != 'd' {
-			// Fall back to standard parser for error message.
-			return time.ParseDuration(s)
-		}
-		days := 0
-		for _, ch := range rest[:i] {
-			days = days*10 + int(ch-'0')
-		}
-		result += time.Duration(days) * 24 * time.Hour
-		rest = rest[i+1:]
-	}
-	return result, nil
-}
+// parseDurationWithDays is implemented in gc.go (same package).

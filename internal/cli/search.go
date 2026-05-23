@@ -30,21 +30,19 @@ import (
 )
 
 func runSearch(args []string) error {
+	// Separate the first non-flag argument (the query) from the flag args.
+	// This allows flags to appear either before or after the query.
+	query, flagArgs, err := extractQuery(args)
+	if err != nil || query == "" {
+		return ErrUsage
+	}
+
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	limit := fs.Int("limit", 20, "max results to return")
 	sessionID := fs.String("session", "", "restrict to this session ID")
 	typeFilter := fs.String("type", "", "restrict to events whose type contains this substring")
 
-	if err := fs.Parse(args); err != nil {
-		return ErrUsage
-	}
-
-	remaining := fs.Args()
-	if len(remaining) == 0 {
-		return ErrUsage
-	}
-	query := remaining[0]
-	if query == "" {
+	if err := fs.Parse(flagArgs); err != nil {
 		return ErrUsage
 	}
 
@@ -87,6 +85,37 @@ func runSearch(args []string) error {
 		fmt.Fprintf(w, "  %s\n\n", snip)
 	}
 	return w.Flush()
+}
+
+// extractQuery separates the first non-flag argument (the search query) from
+// the remaining flag arguments. It understands --flag and --flag=value forms.
+// Returns ("", nil, nil) when no positional arg is found.
+func extractQuery(args []string) (query string, flagArgs []string, err error) {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			// This is a flag. Check if it takes a value (--flag value form).
+			flagArgs = append(flagArgs, a)
+			// If it's not --flag=value form and has a known value-taking flag name,
+			// also consume the next arg as the flag value.
+			if !strings.Contains(a, "=") {
+				stripped := strings.TrimLeft(a, "-")
+				switch stripped {
+				case "limit", "session", "type":
+					if i+1 < len(args) {
+						i++
+						flagArgs = append(flagArgs, args[i])
+					}
+				}
+			}
+		} else if query == "" {
+			// First non-flag arg is the query.
+			query = a
+		}
+		i++
+	}
+	return query, flagArgs, nil
 }
 
 // extractSnippet finds the first occurrence of any word from query in text and

@@ -526,11 +526,11 @@ func TestRunHook_UnknownEvent_StoredVerbatim(t *testing.T) {
 	t.Setenv("AGENTRUN_SESSION_ID", sessionID)
 	t.Setenv("AGENTRUN_DB_PATH", dbPath)
 
-	payload := []byte(`{"hook_event_name":"SubagentStart","whatever":1}`)
+	payload := []byte(`{"hook_event_name":"UnknownExperimentalEvent","whatever":1}`)
 
 	var err error
 	withStdin(t, payload, func() {
-		err = runHook([]string{"claude", "SubagentStart"})
+		err = runHook([]string{"claude", "UnknownExperimentalEvent"})
 	})
 
 	if err != nil {
@@ -542,8 +542,8 @@ func TestRunHook_UnknownEvent_StoredVerbatim(t *testing.T) {
 	}
 
 	evType := getEventType(t, d, sessionID)
-	if evType != "hook.SubagentStart" {
-		t.Errorf("type: got %q, want %q", evType, "hook.SubagentStart")
+	if evType != "hook.UnknownExperimentalEvent" {
+		t.Errorf("type: got %q, want %q", evType, "hook.UnknownExperimentalEvent")
 	}
 
 	// Verify source is "hook".

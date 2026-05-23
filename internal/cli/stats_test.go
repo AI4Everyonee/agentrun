@@ -97,8 +97,8 @@ func seedStatsDB(t *testing.T) (dbPath string, d *sql.DB, cleanup func()) {
 	return dbPathLocal, dLocal, func() { dLocal.Close() }
 }
 
-// captureStdout captures os.Stdout during fn, returning the output bytes.
-func captureStdout(t *testing.T, fn func()) []byte {
+// captureStatsStdout captures os.Stdout during fn, returning the output bytes.
+func captureStatsStdout(t *testing.T, fn func()) []byte {
 	t.Helper()
 	orig := os.Stdout
 	t.Cleanup(func() { os.Stdout = orig })
@@ -114,7 +114,7 @@ func captureStdout(t *testing.T, fn func()) []byte {
 	w.Close()
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
-		t.Fatalf("captureStdout copy: %v", err)
+		t.Fatalf("captureStatsStdout copy: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -124,7 +124,7 @@ func TestRunStats_NoFilter(t *testing.T) {
 	defer cleanup()
 	t.Setenv("AGENTRUN_DB_PATH", dbPath)
 
-	out := captureStdout(t, func() {
+	out := captureStatsStdout(t, func() {
 		if err := runStats([]string{}); err != nil {
 			t.Fatalf("runStats: %v", err)
 		}
@@ -148,7 +148,7 @@ func TestRunStats_RepoFilter(t *testing.T) {
 	defer cleanup()
 	t.Setenv("AGENTRUN_DB_PATH", dbPath)
 
-	out := captureStdout(t, func() {
+	out := captureStatsStdout(t, func() {
 		if err := runStats([]string{"--repo", "/a"}); err != nil {
 			t.Fatalf("runStats --repo: %v", err)
 		}
@@ -173,7 +173,7 @@ func TestRunStats_UserFilter(t *testing.T) {
 	defer cleanup()
 	t.Setenv("AGENTRUN_DB_PATH", dbPath)
 
-	out := captureStdout(t, func() {
+	out := captureStatsStdout(t, func() {
 		if err := runStats([]string{"--user", "alice"}); err != nil {
 			t.Fatalf("runStats --user: %v", err)
 		}
