@@ -54,3 +54,28 @@ func Migrate(db *sql.DB) error {
 	}
 	return nil
 }
+
+// OpenReadWrite opens (but does NOT migrate) an existing SQLite database.
+// Intended for short-lived processes — like `agentrun hook` — that run many
+// times per session and must avoid the cost of re-executing schema.sql on
+// every invocation.
+//
+// The caller is responsible for guaranteeing the DB exists and the schema is
+// applied (this is true for any DB opened previously by db.Open). If the file
+// is missing or the schema is absent, subsequent queries will fail loudly.
+func OpenReadWrite(path string) (*sql.DB, error) {
+	dsn := "file:" + path +
+		"?_pragma=busy_timeout(5000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=foreign_keys(on)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_txlock=immediate"
+
+	d, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("db.OpenReadWrite: sql.Open: %w", err)
+	}
+	// Single connection is fine; the hook process is short-lived.
+	d.SetMaxOpenConns(1)
+	return d, nil
+}
