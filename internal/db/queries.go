@@ -618,3 +618,107 @@ func UpdateSessionSummaryStatus(db *sql.DB, sessionID, status string) error {
 func errContains(err error, sub string) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(sub))
 }
+
+// FetchSessionEvents returns all events for the session, sorted by sequence ascending.
+// Used for export and turn-grouping in show.
+func FetchSessionEvents(d *sql.DB, sessionID string) ([]EventRow, error) {
+	const q = `SELECT id, session_id, sequence, ts, source, type, payload_json, redaction_version
+	FROM events WHERE session_id=? ORDER BY sequence ASC`
+
+	rows, err := d.Query(q, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("FetchSessionEvents: query: %w", err)
+	}
+	defer rows.Close()
+
+	var result []EventRow
+	for rows.Next() {
+		var e EventRow
+		var tsStr string
+		if err := rows.Scan(
+			&e.ID, &e.SessionID, &e.Sequence, &tsStr, &e.Source, &e.Type,
+			&e.PayloadJSON, &e.RedactionVersion,
+		); err != nil {
+			return nil, fmt.Errorf("FetchSessionEvents: scan: %w", err)
+		}
+		e.Ts, err = parseTime(tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("FetchSessionEvents: parse ts: %w", err)
+		}
+		result = append(result, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("FetchSessionEvents: rows: %w", err)
+	}
+	return result, nil
+}
+
+// FinalizeIdleSessions marks running sessions as completed if their last event
+// is older than olderThan ago. Returns the number of session rows finalized.
+// Both UPDATEs happen in one transaction.
+func FinalizeIdleSessions(d *sql.DB, olderThan time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339Nano)
+
+	tx, err := d.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("FinalizeIdleSessions: begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Update sessions.ended_at to the last event's ts for sessions that qualify.
+	const updateSessions = `
+WITH last_event AS (
+    SELECT session_id, MAX(ts) AS last_ts
+      FROM events
+     GROUP BY session_id
+)
+UPDATE sessions
+   SET ended_at = COALESCE(ended_at, (SELECT last_ts FROM last_event WHERE session_id = sessions.id))
+ WHERE id IN (
+     SELECT s.id FROM sessions s
+       JOIN session_summary ss ON ss.session_id = s.id
+       LEFT JOIN last_event le ON le.session_id = s.id
+      WHERE ss.status = 'running'
+        AND (le.last_ts IS NULL OR le.last_ts < ?)
+ )`
+
+	_, err = tx.Exec(updateSessions, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("FinalizeIdleSessions: update sessions: %w", err)
+	}
+
+	// Update session_summary.status = 'completed' for the same qualifying sessions.
+	const updateSummary = `
+WITH last_event AS (
+    SELECT session_id, MAX(ts) AS last_ts
+      FROM events
+     GROUP BY session_id
+)
+UPDATE session_summary SET status = 'completed'
+ WHERE session_id IN (
+     SELECT s.id FROM sessions s
+       JOIN session_summary ss ON ss.session_id = s.id
+       LEFT JOIN last_event le ON le.session_id = s.id
+      WHERE ss.status = 'running'
+        AND (le.last_ts IS NULL OR le.last_ts < ?)
+ )`
+
+	res, err := tx.Exec(updateSummary, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("FinalizeIdleSessions: update session_summary: %w", err)
+	}
+
+	count64, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("FinalizeIdleSessions: rows affected: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("FinalizeIdleSessions: commit: %w", err)
+	}
+	return int(count64), nil
+}
