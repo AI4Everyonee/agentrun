@@ -6,6 +6,12 @@ them in Postgres for later analysis and skill synthesis.
 
 No hooks. No wrapper. No PTY. The agents write the data; we just read it.
 
+## Multi-Agent Factory verification
+
+This repository was used to verify that Multi-Agent Factory can clone a repo,
+create a task branch, apply an agent change, run automatic checks, push the
+branch, and open a pull request.
+
 ## Install (one-liner)
 
 Requires Docker (for Postgres). macOS and Linux, arm64 or amd64.
