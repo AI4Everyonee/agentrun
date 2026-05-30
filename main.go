@@ -16,11 +16,14 @@
 //	agentrun list                   Print recent sessions
 //	agentrun show <session_uuid>    Print every event in one session
 //	agentrun status                 Print health of DB, container, watcher
+//	agentrun paths                  Print Claude and Codex transcript roots
 //
 // Env (also read from ~/.config/agentrun/config.env):
 //
-//	DATABASE_URL   Postgres DSN (required)
-//	AGENTRUN_USER  Identity stamped on every session (defaults to $USER)
+//	DATABASE_URL          Postgres DSN (required for ingest/query commands)
+//	AGENTRUN_USER         Identity stamped on every session (defaults to $USER)
+//	AGENTRUN_CLAUDE_ROOT  Claude transcript root (default ~/.claude/projects)
+//	AGENTRUN_CODEX_ROOT   Codex transcript root (default ~/.codex/sessions)
 package main
 
 import (
@@ -176,6 +179,8 @@ func run(args []string) error {
 		return cmdShow(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
+	case "paths":
+		return cmdPaths(args[1:])
 	case "help", "-h", "--help":
 		return printUsage()
 	default:
@@ -192,11 +197,14 @@ Usage:
   agentrun list                  Show recent sessions
   agentrun show <session_uuid>   Show events in one session
   agentrun status                Health of DB, container, and watcher process
+  agentrun paths                 Print Claude and Codex transcript roots
 
 Config (also read from ~/.config/agentrun/config.env):
-  DATABASE_URL    Postgres DSN (required)
-                  example: postgres://agentrun:agentrun@localhost:5433/agentrun
-  AGENTRUN_USER   Identity stamped on every session (defaults to $USER)`)
+  DATABASE_URL          Postgres DSN (required for ingest/query commands)
+                        example: postgres://agentrun:agentrun@localhost:5433/agentrun
+  AGENTRUN_USER         Identity stamped on every session (defaults to $USER)
+  AGENTRUN_CLAUDE_ROOT  Claude transcript root (defaults to ~/.claude/projects)
+  AGENTRUN_CODEX_ROOT   Codex transcript root (defaults to ~/.codex/sessions)`)
 	return errUsage
 }
 
@@ -473,6 +481,19 @@ func cmdStatus(args []string) error {
 	return nil
 }
 
+func cmdPaths(args []string) error {
+	if len(args) > 0 {
+		return errUsage
+	}
+	rt, err := defaultRoots()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Claude: %s\n", rt.Claude)
+	fmt.Printf("Codex: %s\n", rt.Codex)
+	return nil
+}
+
 func redactDSN(dsn string) string {
 	// keep host:port/db visible, hide credentials
 	if i := strings.Index(dsn, "@"); i > 0 {
@@ -638,14 +659,25 @@ func sanitizeText(s string) string {
 // ─── Watcher ─────────────────────────────────────────────────────────────────
 
 func defaultRoots() (roots, error) {
+	rt := roots{
+		Claude: os.Getenv("AGENTRUN_CLAUDE_ROOT"),
+		Codex:  os.Getenv("AGENTRUN_CODEX_ROOT"),
+	}
+	if rt.Claude != "" && rt.Codex != "" {
+		return rt, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return roots{}, err
 	}
-	return roots{
-		Claude: filepath.Join(home, ".claude", "projects"),
-		Codex:  filepath.Join(home, ".codex", "sessions"),
-	}, nil
+	if rt.Claude == "" {
+		rt.Claude = filepath.Join(home, ".claude", "projects")
+	}
+	if rt.Codex == "" {
+		rt.Codex = filepath.Join(home, ".codex", "sessions")
+	}
+	return rt, nil
 }
 
 func runWatcher(ctx context.Context, pool *pgxpool.Pool, rt roots, user string) error {

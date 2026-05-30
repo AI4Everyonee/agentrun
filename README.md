@@ -47,10 +47,26 @@ agentrun sync [--since 14d]          # one-shot catch-up; exits when done
 agentrun list                        # print 30 most recent sessions
 agentrun show <session_uuid>         # print every event in one session
 agentrun status                      # DB / container / watcher health + counts
+agentrun paths                       # print Claude and Codex transcript roots
 ```
 
 `watch` first does a full sweep so anything written while it was down is
 caught up, then sits on `fsnotify` events.
+
+`paths` only prints local transcript root configuration. It does not require
+`DATABASE_URL`, Postgres, Docker, or a watcher process.
+
+## Configuration
+
+agentrun reads environment variables directly and from
+`~/.config/agentrun/config.env`:
+
+- `DATABASE_URL`: Postgres DSN, required for ingest and query commands.
+- `AGENTRUN_USER`: identity stamped on every session, defaults to `$USER`.
+- `AGENTRUN_CLAUDE_ROOT`: Claude transcript root, defaults to
+  `~/.claude/projects`.
+- `AGENTRUN_CODEX_ROOT`: Codex transcript root, defaults to
+  `~/.codex/sessions`.
 
 ## Status check
 
