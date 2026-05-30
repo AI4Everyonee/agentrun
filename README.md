@@ -123,6 +123,12 @@ This is the ingestion half. The skill synthesis half — clustering sessions
 by embedding, mining recurring patterns, generating `~/.claude/skills/<name>/`
 files — is the next phase, built on top of this same DB.
 
+## Multi-Agent Factory verification
+
+This repository was used to verify that Multi-Agent Factory can clone a repo,
+create a task branch, apply an agent change, run automatic checks, push the
+branch, and open a pull request.
+
 ## Development
 
 Build from source (requires Go 1.22+):
