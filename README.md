@@ -47,6 +47,7 @@ agentrun sync [--since 14d]          # one-shot catch-up; exits when done
 agentrun list                        # print 30 most recent sessions
 agentrun show <session_uuid>         # print every event in one session
 agentrun status                      # DB / container / watcher health + counts
+agentrun paths                       # print Claude and Codex transcript roots
 ```
 
 `watch` first does a full sweep so anything written while it was down is
@@ -62,6 +63,22 @@ Reports whether the database is reachable, whether the Postgres container is
 running, whether a watcher process is alive, and how many sessions / events
 are stored. Exit code is non-zero if anything is unhealthy — useful in cron
 or monitoring.
+
+## Config
+
+Settings are read from environment variables or `~/.config/agentrun/config.env`
+(XDG: `$XDG_CONFIG_HOME/agentrun/config.env`). Environment variables take
+precedence over the file.
+
+| Variable              | Default                  | Description                                          |
+|-----------------------|--------------------------|------------------------------------------------------|
+| `DATABASE_URL`        | *(required)*             | Postgres DSN — needed by watch, sync, list, show, status |
+| `AGENTRUN_USER`       | `$USER`                  | Identity stamped on every ingested session           |
+| `AGENTRUN_CLAUDE_ROOT`| `~/.claude/projects`     | Override the Claude transcript root directory        |
+| `AGENTRUN_CODEX_ROOT` | `~/.codex/sessions`      | Override the Codex transcript root directory         |
+
+`agentrun paths` always prints the resolved roots (respecting any overrides)
+without needing `DATABASE_URL`.
 
 ## Multi-user
 
